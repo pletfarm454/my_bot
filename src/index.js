@@ -8,7 +8,7 @@
 // КОНСТАНТЫ
 // ============================================================
 
-const GEMINI_MODEL = "gemini-2.0-flash-lite";
+const GEMINI_MODEL = "gemini-3.1-flash-lite";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
 const COMPRESS_THRESHOLD = 25;
