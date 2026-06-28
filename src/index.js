@@ -1,7 +1,8 @@
 /**
  * Telegram-бот на Cloudflare Workers + D1 + Gemini API
- * UI: Reply-клавиатуры (кнопки под полем ввода).
- * Добавлена команда /help, настройки профиля, и ретрай (до 4 попыток) при пустом ответе Gemini.
+ * Модель: gemini-3.1-flash-lite
+ * Добавлены: Сюжеты, 4 попытки при пустом ответе, индикатор печати, разделение длинных сообщений, кнопки статуса и сброса.
+ * Добавлена длина ответов "Очень короткие".
  */
 
 // ============================================================
@@ -84,6 +85,11 @@ async function handleMessage(message, env) {
         return;
     }
 
+    if (text === "/myid") {
+        await sendMessage(chatId, `Твой Telegram ID: <code>${chatId}</code>`, null, env);
+        return;
+    }
+
     // --- Проверяем активное состояние ---
     const state = await getState(chatId, env);
     if (state) {
@@ -102,8 +108,21 @@ async function handleMessage(message, env) {
 
     if (text === "🖼️ Галерея") return await showCharacterList(chatId, "gallery", env);
     if (text === "💬 Чат с персонажами") return await showCharacterList(chatId, "chat", env);
+    if (text === "🎭 Сюжеты") return await showPlotMenu(chatId, env, "select");
     
     if (text === "⚙️ Настройки") return await showSettings(chatId, env);
+    if (text === "📋 Мой статус") return await showMyStatus(chatId, env);
+    
+    if (text === "🔄 Сбросить диалог") {
+        const user = await getUser(chatId, env);
+        if (!user?.char_id) {
+            await sendMessage(chatId, "❌ У тебя не выбран персонаж для сброса диалога.", null, env);
+            return;
+        }
+        await clearContext(chatId, user.char_id, env);
+        await sendMessage(chatId, "✅ Диалог с текущим персонажем очищен! Можно начать с чистого листа.", mainMenuKeyboard(), env);
+        return;
+    }
 
     if (text === "✏️ Изменить имя") {
         await setState(chatId, "set_user_name", {}, env);
@@ -134,7 +153,8 @@ async function handleMessage(message, env) {
         return;
     }
 
-    if (text === "Короткие" || text === "Средние" || text === "Длинные") {
+    // Обработка выбора длины (включая новую "Очень короткие")
+    if (text === "⚡️ Очень короткие" || text === "Короткие" || text === "Средние" || text === "Длинные") {
         await updateUserField(chatId, "answer_length", text, env);
         await showSettings(chatId, env);
         return;
@@ -156,12 +176,12 @@ async function handleMessage(message, env) {
 
 async function handleStart(chatId, env) {
     const user = await getUser(chatId, env);
-    let welcomeText = `👋 Привет! Я RP-бот с поддержкой персонажей на базе Gemini AI.\n\n`;
+    let welcomeText = `👋 Привет! Я RP-бот с поддержкой персонажей на базе Gemini AI (модель 3.1).\n\n`;
     
     if (!user?.api_key) {
         welcomeText += `🔑 Перед началом работы введи свой API-ключ Gemini:\n<code>/api ВАШ_КЛЮЧ</code>\n\n`;
     } else {
-        welcomeText += `Ты можешь создавать персонажей, общаться с ними и настраивать свой профиль в <b>⚙️ Настройках</b>.\n\n`;
+        welcomeText += `Ты можешь создавать персонажей, сюжеты и общаться с ними.\n\n`;
     }
     welcomeText += `Введи /help, чтобы узнать подробности.`;
 
@@ -170,16 +190,20 @@ async function handleStart(chatId, env) {
 
 async function handleHelp(chatId, env) {
     const helpText = `🤖 <b>Помощь по боту</b>\n\n` +
-        `Этот бот позволяет создавать уникальных AI-персонажей и общаться с ними с помощью Gemini API.\n\n` +
-        `<b>Основные разделы (кнопки внизу):</b>\n` +
-        `➕ <b>Создать персонажа</b> — создание вручную или генерация через AI.\n` +
-        `🖼️ <b>Галерея</b> — просмотр и удаление ваших персонажей.\n` +
+        `Этот бот позволяет создавать уникальных AI-персонажей и сюжеты для них.\n\n` +
+        `<b>Основные разделы:</b>\n` +
+        `➕ <b>Создать персонажа</b> — создание вручную или через AI.\n` +
+        `🖼️ <b>Галерея</b> — просмотр и удаление персонажей.\n` +
         `💬 <b>Чат с персонажами</b> — выбор персонажа для диалога.\n` +
-        `⚙️ <b>Настройки</b> — настройка имени, описания, языка и длины ответов.\n\n` +
+        `🎭 <b>Сюжеты</b> — создание и выбор сюжетов для активного персонажа.\n` +
+        `🔄 <b>Сбросить диалог</b> — очистка истории чата с текущим персонажем.\n` +
+        `📋 <b>Мой статус</b> — просмотр текущих настроек и выбранного персонажа.\n` +
+        `⚙️ <b>Настройки</b> — профиль, язык и длина ответов.\n\n` +
         `<b>Команды:</b>\n` +
-        `/start — перезапустить бота и показать главное меню\n` +
+        `/start — перезапустить бота\n` +
         `/help — показать это сообщение\n` +
-        `/cancel — отменить текущее действие (если бот ждет ввод текста)\n` +
+        `/cancel — отменить текущее действие\n` +
+        `/myid — узнать свой Telegram ID\n` +
         `/api [ключ] — установить API-ключ Gemini`;
     
     await sendMessage(chatId, helpText, mainMenuKeyboard(), env);
@@ -200,7 +224,37 @@ async function handleSetApiKey(chatId, apiKey, env) {
          ON CONFLICT(chat_id) DO UPDATE SET api_key = excluded.api_key`
     ).bind(chatId, apiKey).run();
 
-    await sendMessage(chatId, "✅ API-ключ сохранён! Теперь ты можешь общаться с ботом.", mainMenuKeyboard(), env);
+    await sendMessage(chatId, "✅ API-ключ сохранён!", mainMenuKeyboard(), env);
+}
+
+// ============================================================
+// МОЙ СТАТУС
+// ============================================================
+
+async function showMyStatus(chatId, env) {
+    const user = await getUser(chatId, env);
+    let statusText = "📋 <b>Твой текущий статус:</b>\n\n";
+    
+    if (user?.char_id) {
+        const char = await env.DB.prepare(`SELECT name FROM characters WHERE id = ?`).bind(user.char_id).first();
+        statusText += `🎭 <b>Персонаж:</b> ${char ? escapeHtml(char.name) : "Не найден"}\n`;
+    } else {
+        statusText += `🎭 <b>Персонаж:</b> Не выбран\n`;
+    }
+    
+    if (user?.plot_id) {
+        const plot = await env.DB.prepare(`SELECT name FROM plots WHERE id = ?`).bind(user.plot_id).first();
+        statusText += `📖 <b>Сюжет:</b> ${plot ? escapeHtml(plot.name) : "Не найден"}\n`;
+    } else {
+        statusText += `📖 <b>Сюжет:</b> Не выбран\n`;
+    }
+    
+    statusText += `\n<b>Настройки:</b>\n` +
+                  `👤 Имя: ${user?.user_name ? escapeHtml(user.user_name) : "Не задано"}\n` +
+                  `🌍 Язык: ${user?.language || "Русский"}\n` +
+                  `📏 Длина: ${user?.answer_length || "Средние"}\n`;
+                  
+    await sendMessage(chatId, statusText, mainMenuKeyboard(), env);
 }
 
 // ============================================================
@@ -208,7 +262,7 @@ async function handleSetApiKey(chatId, apiKey, env) {
 // ============================================================
 
 function buildCharacterPrompt(name, description) {
-    return `Ты — ${name}.\n\n${description}\n\nОставайся в образе персонажа всегда. Отвечай от первого лица, соответствуй описанию выше.`;
+    return `Ты — ${name}.\n\n${description}\n\nОставайся в образе персонажа всегда. Отвечай от первом лице, соответствуй описанию выше.`;
 }
 
 async function startCreateWizard(chatId, env) {
@@ -268,6 +322,7 @@ async function handleState(chatId, text, state, env) {
         const user = await getUser(chatId, env);
 
         await sendMessage(chatId, "⏳ Генерирую персонажа...", null, env);
+        await sendChatAction(chatId, "typing", env);
 
         const genSystemPrompt = (env.GEN_SYSTEM_PROMPT || "").trim() ||
             "Ты — генератор персонажей для ролевых игр. Создавай детальные описания на языке запроса.";
@@ -292,6 +347,29 @@ async function handleState(chatId, text, state, env) {
         await clearState(chatId, env);
 
         await sendMessage(chatId, `✅ Персонаж <b>${escapeHtml(name)}</b> сгенерирован и выбран!\n\n📝 <i>${escapeHtml(description)}</i>`, mainMenuKeyboard(), env);
+        return;
+    }
+
+    // --- СОЗДАНИЕ СЮЖЕТА ---
+    if (step === "create_plot_name") {
+        await setState(chatId, "create_plot_desc", { name: text }, env);
+        await sendMessage(chatId, `✏️ Сюжет: <b>${escapeHtml(text)}</b>\n\nШаг 2/2: Введи <b>описание</b> сюжета.\nОпиши сеттинг, место действия, предысторию или текущую ситуацию.\n\n/cancel — отменить`, null, env);
+        return;
+    }
+
+    if (step === "create_plot_desc") {
+        const name = data.name;
+        const description = text;
+        const user = await getUser(chatId, env);
+        
+        const result = await env.DB.prepare(
+            `INSERT INTO plots (creator_id, character_id, name, description) VALUES (?, ?, ?, ?)`
+        ).bind(chatId, user.char_id, name, description).run();
+        
+        await env.DB.prepare(`UPDATE users SET plot_id = ? WHERE chat_id = ?`).bind(result.meta.last_row_id, chatId).run();
+        await clearState(chatId, env);
+
+        await sendMessage(chatId, `✅ Сюжет <b>${escapeHtml(name)}</b> создан и выбран!`, mainMenuKeyboard(), env);
         return;
     }
 
@@ -333,6 +411,46 @@ async function showSettings(chatId, env) {
 }
 
 // ============================================================
+// УПРАВЛЕНИЕ СЮЖЕТАМИ
+// ============================================================
+
+async function showPlotMenu(chatId, env, mode = "select") {
+    const user = await getUser(chatId, env);
+    if (!user?.char_id) {
+        await sendMessage(chatId, "❌ Сначала выбери персонажа в разделе '💬 Чат с персонажами'.", null, env);
+        return;
+    }
+
+    const plots = await env.DB.prepare(
+        `SELECT id, name FROM plots WHERE character_id = ? AND creator_id = ? ORDER BY id DESC`
+    ).bind(user.char_id, chatId).all();
+
+    const buttons = [];
+    if (plots.results && plots.results.length > 0) {
+        plots.results.forEach(p => {
+            const label = mode === "delete" ? `🗑 ${p.name}` : `🎭 ${p.name}`;
+            const cbData = mode === "delete" ? `delete_plot:${p.id}` : `select_plot:${p.id}`;
+            buttons.push([{ text: label, callback_data: cbData }]);
+        });
+    } else {
+        buttons.push([{ text: "Пусто", callback_data: "ignore" }]);
+    }
+
+    if (mode === "select") {
+        buttons.push([{ text: "➕ Создать сюжет", callback_data: "create_plot" }]);
+        if (plots.results && plots.results.length > 0) {
+            buttons.push([{ text: "🗑 Режим удаления", callback_data: "manage_plots" }]);
+        }
+    } else {
+        buttons.push([{ text: "🔙 К выбору сюжета", callback_data: "select_plot_menu" }]);
+    }
+    buttons.push([{ text: "🔙 Закрыть", callback_data: "close_list" }]);
+
+    const header = mode === "delete" ? "🗑 <b>Режим удаления сюжетов</b>\nНажми на сюжет, чтобы удалить его:" : "🎭 <b>Сюжеты персонажа</b>\nВыбери активный сюжет:";
+    await sendMessage(chatId, header, { inline_keyboard: buttons }, env);
+}
+
+// ============================================================
 // ОБРАБОТЧИК INLINE-КНОПОК
 // ============================================================
 
@@ -342,6 +460,9 @@ async function handleCallbackQuery(callbackQuery, env) {
 
     await answerCallbackQuery(callbackQuery.id, env);
 
+    if (data === "ignore") return;
+
+    // --- Персонажи ---
     if (data.startsWith("select_char:")) {
         await handleSelectCharacter(chatId, parseInt(data.split(":")[1]), env);
         return;
@@ -349,6 +470,39 @@ async function handleCallbackQuery(callbackQuery, env) {
 
     if (data.startsWith("delete_char:")) {
         await handleDeleteCharacter(chatId, parseInt(data.split(":")[1]), env);
+        return;
+    }
+
+    // --- Сюжеты ---
+    if (data === "select_plot_menu") {
+        await showPlotMenu(chatId, env, "select");
+        return;
+    }
+    if (data === "manage_plots") {
+        await showPlotMenu(chatId, env, "delete");
+        return;
+    }
+    if (data === "create_plot") {
+        const user = await getUser(chatId, env);
+        if (!user?.char_id) return await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
+        await setState(chatId, "create_plot_name", {}, env);
+        await sendMessage(chatId, "➕ <b>Создание сюжета</b>\n\nШаг 1/2: Введи <b>название</b> сюжета\n\n/cancel — отменить", hideKeyboard(), env);
+        return;
+    }
+    if (data.startsWith("select_plot:")) {
+        const plotId = parseInt(data.split(":")[1]);
+        await env.DB.prepare(`UPDATE users SET plot_id = ? WHERE chat_id = ?`).bind(plotId, chatId).run();
+        await sendMessage(chatId, "✅ Сюжет выбран! Теперь он будет учитывать в диалоге.", null, env);
+        return;
+    }
+    if (data.startsWith("delete_plot:")) {
+        const plotId = parseInt(data.split(":")[1]);
+        await env.DB.prepare(`DELETE FROM plots WHERE id = ? AND creator_id = ?`).bind(plotId, chatId).run();
+        const user = await getUser(chatId, env);
+        if (user?.plot_id === plotId) {
+            await env.DB.prepare(`UPDATE users SET plot_id = NULL WHERE chat_id = ?`).bind(chatId).run();
+        }
+        await showPlotMenu(chatId, env, "delete");
         return;
     }
 }
@@ -381,6 +535,13 @@ async function handleChat(chatId, userText, env) {
         }
     }
 
+    if (user.plot_id) {
+        const plot = await env.DB.prepare(`SELECT name, description FROM plots WHERE id = ? AND creator_id = ?`).bind(user.plot_id, chatId).first();
+        if (plot) {
+            characterPrompt += `\n\n--- ТЕКУЩИЙ СЮЖЕТ ---\nНазвание: ${plot.name}\nОписание сюжета: ${plot.description}\nОтыгрывай этот сюжет в диалоге.`;
+        }
+    }
+
     const systemPrompt = buildSystemPrompt(characterPrompt, user, env);
 
     await saveMessage(chatId, characterId, "user", userText, env);
@@ -392,12 +553,14 @@ async function handleChat(chatId, userText, env) {
          ORDER BY timestamp ASC`
     ).bind(chatId, characterId, characterId).all();
 
-    // Копируем массив, чтобы безопасно модифицировать его при повторных попытках
     let currentContents = (history.results || [])
         .map(row => ({ role: row.role, parts: [{ text: row.text }] }));
         
     let currentSystemPrompt = systemPrompt;
     let botReply = "";
+
+    // Отправляем индикатор набора текста
+    await sendChatAction(chatId, "typing", env);
 
     // Делаем до 4 попыток получить ответ
     for (let attempt = 1; attempt <= 4; attempt++) {
@@ -408,26 +571,20 @@ async function handleChat(chatId, userText, env) {
             return;
         }
 
-        // Если ответ получен и он не пустой — выходим из цикла
         if (botReply) break;
 
         console.log(`Попытка ${attempt}: пустой ответ от Gemini. Модифицируем запрос...`);
         
-        // Если это первая попытка (и она провалилась), модифицируем массив: 
-        // вставляем системный промпт в последнее сообщение пользователя
         if (attempt === 1) {
             const lastMsgIndex = currentContents.length - 1;
             if (currentContents[lastMsgIndex] && currentContents[lastMsgIndex].role === "user") {
                 currentContents[lastMsgIndex].parts[0].text = 
                     currentSystemPrompt + "\n\n" + currentContents[lastMsgIndex].parts[0].text;
             }
-            // Очищаем system_instruction, чтобы не отправлять его дважды
             currentSystemPrompt = ""; 
         }
-        // Если attempt > 1, запрос уже модифицирован, просто отправляем его заново
     }
 
-    // Если после 4 попыток ответ так и не получен
     if (!botReply) {
         await sendMessage(chatId, "❌ Gemini вернул пустой ответ после 4 попыток. Попробуй переформулировать запрос.", null, env);
         return;
@@ -451,7 +608,6 @@ async function callGemini(apiKey, systemPrompt, contents) {
         generationConfig: { temperature: 0.9 },
     };
 
-    // Добавляем system_instruction только если он не пустой
     if (systemPrompt && systemPrompt.trim() !== "") {
         body.system_instruction = { parts: [{ text: systemPrompt }] };
     }
@@ -470,7 +626,6 @@ async function callGemini(apiKey, systemPrompt, contents) {
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     
-    // Возвращаем null, если текста нет
     if (!text) return null;
 
     return text;
@@ -494,9 +649,15 @@ function buildSystemPrompt(characterPrompt, user, env) {
         userSettings += `Отвечай на языке: ${user.language} (${langCode}).\n`;
         
         let lengthRule = "";
-        if (user.answer_length === "Короткие") lengthRule = "Твои ответы должны быть очень краткими (1-2 предложения).";
-        else if (user.answer_length === "Длинные") lengthRule = "Твои ответы должны быть развернутыми и детальными.";
-        else lengthRule = "Твои ответы должны быть средней длины (3-5 предложений).";
+        if (user.answer_length === "⚡️ Очень короткие") {
+            lengthRule = "Отвечай как живой человек в мессенджере: буквально несколько слов или одно очень короткое предложение. Никогда не пиши длинные тексты.";
+        } else if (user.answer_length === "Короткие") {
+            lengthRule = "Твои ответы должны быть очень краткими (1-2 предложения).";
+        } else if (user.answer_length === "Длинные") {
+            lengthRule = "Твои ответы должны быть развернутыми и детальными.";
+        } else {
+            lengthRule = "Твои ответы должны быть средней длины (3-5 предложений).";
+        }
         userSettings += lengthRule + "\n";
     }
 
@@ -570,14 +731,14 @@ async function clearState(chatId, env) {
 
 async function getUser(chatId, env) {
     return await env.DB.prepare(
-        `SELECT chat_id, api_key, char_id, language, user_name, user_description, answer_length FROM users WHERE chat_id = ?`
+        `SELECT chat_id, api_key, char_id, language, user_name, user_description, answer_length, plot_id FROM users WHERE chat_id = ?`
     ).bind(chatId).first();
 }
 
 async function setActiveCharacter(chatId, charId, env) {
     await env.DB.prepare(
-        `INSERT INTO users (chat_id, char_id) VALUES (?, ?)
-         ON CONFLICT(chat_id) DO UPDATE SET char_id = excluded.char_id`
+        `INSERT INTO users (chat_id, char_id, plot_id) VALUES (?, ?, NULL)
+         ON CONFLICT(chat_id) DO UPDATE SET char_id = excluded.char_id, plot_id = NULL`
     ).bind(chatId, charId).run();
 }
 
@@ -593,6 +754,10 @@ async function saveMessage(chatId, characterId, role, text, env) {
     await env.DB.prepare(
         `INSERT INTO messages (chat_id, character_id, role, text, timestamp) VALUES (?, ?, ?, ?, ?)`
     ).bind(chatId, characterId, role, text, timestamp).run();
+}
+
+async function clearContext(chatId, characterId, env) {
+    await env.DB.prepare(`DELETE FROM messages WHERE chat_id = ? AND character_id = ?`).bind(chatId, characterId).run();
 }
 
 // ============================================================
@@ -626,7 +791,7 @@ async function handleSelectCharacter(chatId, charId, env) {
     if (!char) return await sendMessage(chatId, "❌ Персонаж не найден.", null, env);
 
     await setActiveCharacter(chatId, charId, env);
-    await sendMessage(chatId, `✅ Персонаж <b>${escapeHtml(char.name)}</b> выбран! Пиши сообщения, и я отвечу от его лица.`, null, env);
+    await sendMessage(chatId, `✅ Персонаж <b>${escapeHtml(char.name)}</b> выбран!\nНе забудь выбрать сюжет в меню "🎭 Сюжеты", если нужно.`, null, env);
 }
 
 async function handleDeleteCharacter(chatId, charId, env) {
@@ -635,6 +800,7 @@ async function handleDeleteCharacter(chatId, charId, env) {
 
     await env.DB.prepare(`DELETE FROM characters WHERE id = ? AND creator_id = ?`).bind(charId, chatId).run();
     await env.DB.prepare(`DELETE FROM messages WHERE chat_id = ? AND character_id = ?`).bind(chatId, charId).run();
+    await env.DB.prepare(`DELETE FROM plots WHERE character_id = ? AND creator_id = ?`).bind(charId, chatId).run();
 
     const user = await getUser(chatId, env);
     if (user?.char_id === charId) await setActiveCharacter(chatId, null, env);
@@ -647,17 +813,56 @@ async function handleDeleteCharacter(chatId, charId, env) {
 // ============================================================
 
 async function sendMessage(chatId, text, replyMarkup, env) {
-    const url  = `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`;
-    const body = { chat_id: chatId, text: text, parse_mode: "HTML" };
-    if (replyMarkup) body.reply_markup = replyMarkup;
+    const maxLen = 4000; // Немного меньше лимита Telegram с запасом на HTML теги
+    let messagesToSend = [];
 
-    const res = await fetch(url, {
-        method:  "POST",
+    // Разбиваем длинный текст на части
+    if (text.length > maxLen) {
+        let str = text;
+        while (str.length > maxLen) {
+            let splitIndex = str.lastIndexOf("\n", maxLen);
+            if (splitIndex <= 0 || splitIndex > maxLen) {
+                splitIndex = str.lastIndexOf(" ", maxLen);
+            }
+            if (splitIndex <= 0 || splitIndex > maxLen) {
+                splitIndex = maxLen;
+            }
+            messagesToSend.push(str.slice(0, splitIndex));
+            str = str.slice(splitIndex).trim();
+        }
+        if (str.length > 0) messagesToSend.push(str);
+    } else {
+        messagesToSend.push(text);
+    }
+
+    // Отправляем по очереди
+    for (let i = 0; i < messagesToSend.length; i++) {
+        const isLast = i === messagesToSend.length - 1;
+        const url  = `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`;
+        const body = {
+            chat_id: chatId,
+            text: messagesToSend[i],
+            parse_mode: "HTML"
+        };
+        // Клавиатуру прикрепляем только к последнему сообщению
+        if (isLast && replyMarkup) body.reply_markup = replyMarkup;
+
+        const res = await fetch(url, {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify(body),
+        });
+
+        if (!res.ok) console.error("Ошибка sendMessage:", await res.text());
+    }
+}
+
+async function sendChatAction(chatId, action, env) {
+    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendChatAction`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(body),
+        body: JSON.stringify({ chat_id: chatId, action: action })
     });
-
-    if (!res.ok) console.error("Ошибка sendMessage:", await res.text());
 }
 
 async function answerCallbackQuery(callbackQueryId, env) {
@@ -676,7 +881,9 @@ function mainMenuKeyboard() {
     return {
         keyboard: [
             [{ text: "➕ Создать персонажа" }, { text: "🖼️ Галерея" }],
-            [{ text: "💬 Чат с персонажами" }, { text: "⚙️ Настройки" }]
+            [{ text: "💬 Чат с персонажами" }, { text: "🎭 Сюжеты" }],
+            [{ text: "🔄 Сбросить диалог" }, { text: "📋 Мой статус" }],
+            [{ text: "⚙️ Настройки" }]
         ],
         resize_keyboard: true
     };
@@ -716,7 +923,8 @@ function languageMenuKeyboard() {
 function lengthMenuKeyboard() {
     return {
         keyboard: [
-            [{ text: "Короткие" }, { text: "Средние" }, { text: "Длинные" }],
+            [{ text: "⚡️ Очень короткие" }, { text: "Короткие" }],
+            [{ text: "Средние" }, { text: "Длинные" }],
             [{ text: "🔙 Назад" }]
         ],
         resize_keyboard: true
@@ -733,4 +941,4 @@ function hideKeyboard() {
 
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-                      }
+}
