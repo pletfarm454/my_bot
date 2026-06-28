@@ -68,7 +68,7 @@ async function handleMessage(message, env) {
         return;
     }
 
-    if (text === "/help" || text === "/help@" + (env.BOT_USERNAME || "")) {
+    if (text === "/help" || text.startsWith("/help")) {
         await handleHelp(chatId, env);
         return;
     }
@@ -84,16 +84,14 @@ async function handleMessage(message, env) {
         return;
     }
 
-    // --- Проверяем активное состояние (ввод имени/описания) ---
-    // Делаем это ДО проверки кнопок, чтобы пользователь мог случайно 
-    // ввести текст, совпадающий с названием кнопки, и это записалось в состояние.
+    // --- Проверяем активное состояние ---
     const state = await getState(chatId, env);
     if (state) {
         await handleState(chatId, text, state, env);
         return;
     }
 
-    // --- Навигация по Reply-кнопкам (меню под полем ввода) ---
+    // --- Навигация по Reply-кнопкам ---
     if (text === "➕ Создать персонажа") {
         await sendMessage(chatId, "➕ <b>Создание персонажа</b>\n\nКак хочешь создать?", createMenuKeyboard(), env);
         return;
@@ -129,17 +127,16 @@ async function handleMessage(message, env) {
         return;
     }
 
-    // Обработка выбора языка и длины
     if (text === "🇷🇺 Русский" || text === "🇬🇧 English" || text === "🇪🇸 Español") {
-        const lang = text.split(" ")[1]; // Берем только слово "Русский"
+        const lang = text.split(" ")[1];
         await updateUserField(chatId, "language", lang, env);
-        await showSettings(chatId, env); // Возвращаем в меню настроек
+        await showSettings(chatId, env);
         return;
     }
 
     if (text === "Короткие" || text === "Средние" || text === "Длинные") {
         await updateUserField(chatId, "answer_length", text, env);
-        await showSettings(chatId, env); // Возвращаем в меню настроек
+        await showSettings(chatId, env);
         return;
     }
 
@@ -207,7 +204,7 @@ async function handleSetApiKey(chatId, apiKey, env) {
 }
 
 // ============================================================
-// ПОШАГОВЫЕ ДЕЙСТВИЯ (СОЗДАНИЕ ПЕРСОНАЖА И НАСТРОЙКИ)
+// ПОШАГОВЫЕ ДЕЙСТВИЯ
 // ============================================================
 
 function buildCharacterPrompt(name, description) {
@@ -239,7 +236,7 @@ async function handleState(chatId, text, state, env) {
 
     if (step === "create_name") {
         await setState(chatId, "create_desc", { name: text }, env);
-        await sendMessage(chatId, `✏️ Имя: <b>${escapeHtml(text)}</b>\n\nШаг 2/2: Введи <b>описание</b> персонажа.\n\n/cancel — отменить", null, env);
+        await sendMessage(chatId, `✏️ Имя: <b>${escapeHtml(text)}</b>\n\nШаг 2/2: Введи <b>описание</b> персонажа.\n\n/cancel — отменить`, null, env);
         return;
     }
 
@@ -261,7 +258,7 @@ async function handleState(chatId, text, state, env) {
 
     if (step === "gen_name") {
         await setState(chatId, "gen_idea", { name: text }, env);
-        await sendMessage(chatId, `✏️ Имя: <b>${escapeHtml(text)}</b>\n\nШаг 2/2: Опиши идею персонажа вкратце.\n\n/cancel — отменить", null, env);
+        await sendMessage(chatId, `✏️ Имя: <b>${escapeHtml(text)}</b>\n\nШаг 2/2: Опиши идею персонажа вкратце.\n\n/cancel — отменить`, null, env);
         return;
     }
 
@@ -336,7 +333,7 @@ async function showSettings(chatId, env) {
 }
 
 // ============================================================
-// ОБРАБОТЧИК INLINE-КНОПОК (для списков персонажей)
+// ОБРАБОТЧИК INLINE-КНОПОК
 // ============================================================
 
 async function handleCallbackQuery(callbackQuery, env) {
@@ -636,7 +633,7 @@ async function answerCallbackQuery(callbackQueryId, env) {
 }
 
 // ============================================================
-// КЛАВИАТУРЫ (Reply Keyboard - кнопки под полем ввода)
+// КЛАВИАТУРЫ
 // ============================================================
 
 function mainMenuKeyboard() {
