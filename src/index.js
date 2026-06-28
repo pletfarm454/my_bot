@@ -120,7 +120,7 @@ async function handleMessage(message, env) {
 
 async function handleStart(chatId, env) {
     const welcomeText =
-        `👋 Привет! Я бот с поддержкой персонажей на базе Gemini AI.\n\n` +
+        `Привет! Я бот с поддержкой персонажей на базе Gemini AI.\n\n` +
         `Перед началом работы введи свой API-ключ Gemini:\n` +
         `<code>/api ВАШ_КЛЮЧ</code>\n\n` +
         `После этого ты сможешь создавать персонажей и общаться с ними!`;
