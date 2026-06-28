@@ -16,7 +16,7 @@
 // ============================================================
 
 /** Модель Gemini для генерации ответов */
-const GEMINI_MODEL = "gemini-2.5-flash-lite-preview-06-17";
+const GEMINI_MODEL = "gemini-3.1-flash-lite";
 
 /** Базовый URL Gemini REST API */
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
