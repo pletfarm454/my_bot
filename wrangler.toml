@@ -6,7 +6,6 @@ compatibility_flags = ["nodejs_compat"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = " teg
+database_name = "teg"
 database_id   = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-
 # GLOBAL_SYSTEM_PROMPT — добавь через Dashboard как Secret, не здесь
