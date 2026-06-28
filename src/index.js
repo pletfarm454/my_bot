@@ -1,7 +1,7 @@
 /**
  * Telegram-бот на Cloudflare Workers + D1 + Gemini API
- * UI изменен на Reply-клавиатуры (кнопки под полем ввода).
- * Добавлена команда /help и улучшена навигация.
+ * UI: Reply-клавиатуры (кнопки под полем ввода).
+ * Добавлена команда /help, настройки профиля, и ретрай (до 4 попыток) при пустом ответе Gemini.
  */
 
 // ============================================================
@@ -354,7 +354,7 @@ async function handleCallbackQuery(callbackQuery, env) {
 }
 
 // ============================================================
-// ОСНОВНАЯ ЛОГИКА ЧАТА С GEMINI
+// ОСНОВНАЯ ЛОГИКА ЧАТА С GEMINI (С РЕТРАЕМ ДО 4 ПОПЫТОК)
 // ============================================================
 
 async function handleChat(chatId, userText, env) {
@@ -392,14 +392,44 @@ async function handleChat(chatId, userText, env) {
          ORDER BY timestamp ASC`
     ).bind(chatId, characterId, characterId).all();
 
-    const contents = (history.results || [])
+    // Копируем массив, чтобы безопасно модифицировать его при повторных попытках
+    let currentContents = (history.results || [])
         .map(row => ({ role: row.role, parts: [{ text: row.text }] }));
-
+        
+    let currentSystemPrompt = systemPrompt;
     let botReply = "";
-    try {
-        botReply = await callGemini(user.api_key, systemPrompt, contents);
-    } catch (e) {
-        await sendMessage(chatId, `❌ Ошибка при запросе к Gemini:\n<code>${escapeHtml(String(e))}</code>`, null, env);
+
+    // Делаем до 4 попыток получить ответ
+    for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+            botReply = await callGemini(user.api_key, currentSystemPrompt, currentContents);
+        } catch (e) {
+            await sendMessage(chatId, `❌ Ошибка при запросе к Gemini:\n<code>${escapeHtml(String(e))}</code>`, null, env);
+            return;
+        }
+
+        // Если ответ получен и он не пустой — выходим из цикла
+        if (botReply) break;
+
+        console.log(`Попытка ${attempt}: пустой ответ от Gemini. Модифицируем запрос...`);
+        
+        // Если это первая попытка (и она провалилась), модифицируем массив: 
+        // вставляем системный промпт в последнее сообщение пользователя
+        if (attempt === 1) {
+            const lastMsgIndex = currentContents.length - 1;
+            if (currentContents[lastMsgIndex] && currentContents[lastMsgIndex].role === "user") {
+                currentContents[lastMsgIndex].parts[0].text = 
+                    currentSystemPrompt + "\n\n" + currentContents[lastMsgIndex].parts[0].text;
+            }
+            // Очищаем system_instruction, чтобы не отправлять его дважды
+            currentSystemPrompt = ""; 
+        }
+        // Если attempt > 1, запрос уже модифицирован, просто отправляем его заново
+    }
+
+    // Если после 4 попыток ответ так и не получен
+    if (!botReply) {
+        await sendMessage(chatId, "❌ Gemini вернул пустой ответ после 4 попыток. Попробуй переформулировать запрос.", null, env);
         return;
     }
 
@@ -417,10 +447,14 @@ async function callGemini(apiKey, systemPrompt, contents) {
     const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
     const body = {
-        system_instruction: { parts: [{ text: systemPrompt }] },
         contents,
         generationConfig: { temperature: 0.9 },
     };
+
+    // Добавляем system_instruction только если он не пустой
+    if (systemPrompt && systemPrompt.trim() !== "") {
+        body.system_instruction = { parts: [{ text: systemPrompt }] };
+    }
 
     const response = await fetch(url, {
         method:  "POST",
@@ -435,7 +469,9 @@ async function callGemini(apiKey, systemPrompt, contents) {
 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) throw new Error("Gemini вернул пустой ответ: " + JSON.stringify(data));
+    
+    // Возвращаем null, если текста нет
+    if (!text) return null;
 
     return text;
 }
@@ -697,4 +733,4 @@ function hideKeyboard() {
 
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+                      }
