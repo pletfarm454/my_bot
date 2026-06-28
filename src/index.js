@@ -16,7 +16,7 @@
 // ============================================================
 
 /** Модель Gemini для генерации ответов */
-const GEMINI_MODEL = "gemini-3.1-flash-lite";
+const GEMINI_MODEL = "gemini-2.0-flash-lite";
 
 /** Базовый URL Gemini REST API */
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -88,10 +88,17 @@ async function handleMessage(message, env) {
 
     if (!text) return; // Игнорируем пустые / медиа-сообщения
 
-    // --- Маршрутизация по командам ---
+    // --- Команды всегда имеют приоритет над состоянием ---
 
     if (text.startsWith("/start")) {
+        await clearState(chatId, env);
         await handleStart(chatId, env);
+        return;
+    }
+
+    if (text === "/cancel") {
+        await clearState(chatId, env);
+        await sendMessage(chatId, "❌ Отменено.", mainMenuKeyboard(), env);
         return;
     }
 
@@ -100,13 +107,15 @@ async function handleMessage(message, env) {
         return;
     }
 
-    if (text.startsWith("/create_char ")) {
-        await handleCreateChar(chatId, text.slice(13).trim(), env);
+    if (text.startsWith("/edit_prompt ")) {
+        await handleEditPrompt(chatId, text.slice(13).trim(), env);
         return;
     }
 
-    if (text.startsWith("/edit_prompt ")) {
-        await handleEditPrompt(chatId, text.slice(13).trim(), env);
+    // --- Проверяем активное состояние (пошаговые диалоги) ---
+    const state = await getState(chatId, env);
+    if (state) {
+        await handleState(chatId, text, state, env);
         return;
     }
 
@@ -120,7 +129,7 @@ async function handleMessage(message, env) {
 
 async function handleStart(chatId, env) {
     const welcomeText =
-        `Привет! Я бот с поддержкой персонажей на базе Gemini AI.\n\n` +
+        `👋 Привет! Я бот с поддержкой персонажей на базе Gemini AI.\n\n` +
         `Перед началом работы введи свой API-ключ Gemini:\n` +
         `<code>/api ВАШ_КЛЮЧ</code>\n\n` +
         `После этого ты сможешь создавать персонажей и общаться с ними!`;
@@ -148,52 +157,148 @@ async function handleSetApiKey(chatId, apiKey, env) {
 }
 
 // ============================================================
-// КОМАНДА /create_char — создание персонажа
-// Формат: /create_char Имя | Системный промпт
+// ПОШАГОВОЕ СОЗДАНИЕ ПЕРСОНАЖА — через состояния
 // ============================================================
 
-async function handleCreateChar(chatId, input, env) {
-    // Проверяем наличие API-ключа
+/**
+ * Шаблон системного промпта персонажа.
+ * {name} и {description} заменяются реальными значениями.
+ */
+function buildCharacterPrompt(name, description) {
+    return `Ты — ${name}.\n\n${description}\n\nОставайся в образе персонажа всегда. Отвечай от первого лица, соответствуй описанию выше.`;
+}
+
+/**
+ * Запускает пошаговое создание: шаг 1 — запрос имени.
+ */
+async function startCreateWizard(chatId, env) {
     const user = await getUser(chatId, env);
     if (!user?.api_key) {
         await sendMessage(chatId, "🔑 Сначала введи API-ключ:\n<code>/api ВАШ_КЛЮЧ</code>", null, env);
         return;
     }
+    await setState(chatId, "create_name", {}, env);
+    await sendMessage(
+        chatId,
+        "➕ <b>Создание персонажа</b>\n\nШаг 1/2: Введи <b>имя</b> персонажа\n\n/cancel — отменить",
+        null, env
+    );
+}
 
-    const parts = input.split("|");
-    if (parts.length < 2) {
+/**
+ * Запускает пошаговую генерацию персонажа через Gemini: шаг 1 — запрос идеи.
+ */
+async function startGenWizard(chatId, env) {
+    const user = await getUser(chatId, env);
+    if (!user?.api_key) {
+        await sendMessage(chatId, "🔑 Сначала введи API-ключ:\n<code>/api ВАШ_КЛЮЧ</code>", null, env);
+        return;
+    }
+    await setState(chatId, "gen_name", {}, env);
+    await sendMessage(
+        chatId,
+        "🤖 <b>Генерация персонажа</b>\n\nШаг 1/2: Введи <b>имя</b> персонажа\n\n/cancel — отменить",
+        null, env
+    );
+}
+
+/**
+ * Диспетчер состояний — вызывается когда у пользователя есть активный шаг.
+ */
+async function handleState(chatId, text, state, env) {
+    const { step, data } = state;
+
+    // --- Пошаговое ручное создание ---
+    if (step === "create_name") {
+        // Сохраняем имя, переходим к описанию
+        await setState(chatId, "create_desc", { name: text }, env);
         await sendMessage(
             chatId,
-            "❌ Неверный формат. Используй:\n<code>/create_char Имя | Системный промпт</code>",
+            `✏️ Имя: <b>${escapeHtml(text)}</b>\n\nШаг 2/2: Введи <b>описание</b> персонажа.\nОпиши его характер, речь, поведение, особенности — всё что важно.\n\n/cancel — отменить`,
             null, env
         );
         return;
     }
 
-    const name         = parts[0].trim();
-    const systemPrompt = parts.slice(1).join("|").trim(); // Всё после первого "|"
+    if (step === "create_desc") {
+        // Имя + описание готовы — создаём персонажа
+        const name        = data.name;
+        const description = text;
+        const prompt      = buildCharacterPrompt(name, description);
 
-    if (!name || !systemPrompt) {
-        await sendMessage(chatId, "❌ Имя и промпт не могут быть пустыми.", null, env);
+        const result = await env.DB.prepare(
+            `INSERT INTO characters (name, system_prompt, creator_id) VALUES (?, ?, ?)`
+        ).bind(name, prompt, chatId).run();
+
+        const newCharId = result.meta.last_row_id;
+        await setActiveCharacter(chatId, newCharId, env);
+        await clearState(chatId, env);
+
+        await sendMessage(
+            chatId,
+            `✅ Персонаж <b>${escapeHtml(name)}</b> создан и выбран!\n\n📝 <i>${escapeHtml(description.slice(0, 200))}${description.length > 200 ? "..." : ""}</i>`,
+            mainMenuKeyboard(), env
+        );
         return;
     }
 
-    // Сохраняем персонажа в БД
-    const result = await env.DB.prepare(
-        `INSERT INTO characters (name, system_prompt, creator_id) VALUES (?, ?, ?)`
-    ).bind(name, systemPrompt, chatId).run();
+    // --- Пошаговая генерация через Gemini ---
+    if (step === "gen_name") {
+        await setState(chatId, "gen_idea", { name: text }, env);
+        await sendMessage(
+            chatId,
+            `✏️ Имя: <b>${escapeHtml(text)}</b>\n\nШаг 2/2: Опиши идею персонажа вкратце.\nНапример: «злой маг из средневековья» или «весёлый робот из будущего»\n\n/cancel — отменить`,
+            null, env
+        );
+        return;
+    }
 
-    const newCharId = result.meta.last_row_id;
+    if (step === "gen_idea") {
+        const name = data.name;
+        const idea = text;
+        const user = await getUser(chatId, env);
 
-    // Сразу делаем нового персонажа активным
-    await setActiveCharacter(chatId, newCharId, env);
+        await sendMessage(chatId, "⏳ Генерирую персонажа...", null, env);
 
-    await sendMessage(
-        chatId,
-        `✅ Персонаж <b>${escapeHtml(name)}</b> создан и выбран как активный!\n\n` +
-        `📝 Промпт: <i>${escapeHtml(systemPrompt)}</i>`,
-        mainMenuKeyboard(), env
-    );
+        // Промпт генерации берётся из секрета GEN_SYSTEM_PROMPT (Dashboard → Variables → Secret).
+        // Если секрет не задан — используется дефолтный фолбэк.
+        const genSystemPrompt = (env.GEN_SYSTEM_PROMPT || "").trim() ||
+            "Ты — генератор персонажей для ролевых игр. " +
+            "Создавай детальные, живые описания персонажей на том же языке, что и запрос пользователя. " +
+            "Описывай характер, манеру речи, ценности, привычки, особенности поведения. " +
+            "Пиши от третьего лица, 3-5 предложений. Только описание, без лишних слов.";
+
+        const genContents = [{
+            role: "user",
+            parts: [{ text: `Создай описание персонажа по имени «${name}». Идея: ${idea}` }],
+        }];
+
+        let description = "";
+        try {
+            description = await callGemini(user.api_key, genSystemPrompt, genContents);
+        } catch (e) {
+            await clearState(chatId, env);
+            await sendMessage(chatId, `❌ Ошибка генерации:\n<code>${escapeHtml(String(e))}</code>`, mainMenuKeyboard(), env);
+            return;
+        }
+
+        const prompt = buildCharacterPrompt(name, description);
+
+        const result = await env.DB.prepare(
+            `INSERT INTO characters (name, system_prompt, creator_id) VALUES (?, ?, ?)`
+        ).bind(name, prompt, chatId).run();
+
+        const newCharId = result.meta.last_row_id;
+        await setActiveCharacter(chatId, newCharId, env);
+        await clearState(chatId, env);
+
+        await sendMessage(
+            chatId,
+            `✅ Персонаж <b>${escapeHtml(name)}</b> сгенерирован и выбран!\n\n📝 <i>${escapeHtml(description)}</i>`,
+            mainMenuKeyboard(), env
+        );
+        return;
+    }
 }
 
 // ============================================================
@@ -256,11 +361,29 @@ async function handleCallbackQuery(callbackQuery, env) {
     }
 
     if (data === "create") {
+        // Показываем выбор способа создания
         await sendMessage(
             chatId,
-            "➕ Создай персонажа командой:\n<code>/create_char Имя | Системный промпт</code>\n\nПример:\n<code>/create_char Пиратский Капитан | Ты пират Джек Воробей, говоришь с юмором и любишь ром.</code>",
-            null, env
+            "➕ <b>Создание персонажа</b>\n\nКак хочешь создать персонажа?",
+            {
+                inline_keyboard: [
+                    [{ text: "✏️ Вручную",          callback_data: "create_manual" }],
+                    [{ text: "🤖 Сгенерировать AI", callback_data: "create_gen"    }],
+                    [{ text: "🔙 Назад",             callback_data: "main_menu"     }],
+                ],
+            },
+            env
         );
+        return;
+    }
+
+    if (data === "create_manual") {
+        await startCreateWizard(chatId, env);
+        return;
+    }
+
+    if (data === "create_gen") {
+        await startGenWizard(chatId, env);
         return;
     }
 
@@ -297,7 +420,7 @@ async function showCharacterList(chatId, mode, env) {
     if (!chars.results || chars.results.length === 0) {
         await sendMessage(
             chatId,
-            "📭 У тебя пока нет персонажей.\n\nСоздай первого командой:\n<code>/create_char Имя | Промпт</code>",
+            "📭 У тебя пока нет персонажей.\n\nНажми ➕ Создать персонажа в главном меню.",
             backToMenuKeyboard(), env
         );
         return;
@@ -601,6 +724,32 @@ async function maybeCompressContext(chatId, characterId, apiKey, systemPrompt, e
 }
 
 
+
+// ============================================================
+// УПРАВЛЕНИЕ СОСТОЯНИЕМ (пошаговые диалоги)
+// ============================================================
+
+/** Получить текущее состояние пользователя */
+async function getState(chatId, env) {
+    const row = await env.DB.prepare(
+        `SELECT step, data FROM states WHERE chat_id = ?`
+    ).bind(chatId).first();
+    if (!row) return null;
+    return { step: row.step, data: row.data ? JSON.parse(row.data) : {} };
+}
+
+/** Установить состояние пользователя */
+async function setState(chatId, step, data, env) {
+    await env.DB.prepare(
+        `INSERT INTO states (chat_id, step, data) VALUES (?, ?, ?)
+         ON CONFLICT(chat_id) DO UPDATE SET step = excluded.step, data = excluded.data`
+    ).bind(chatId, step, JSON.stringify(data)).run();
+}
+
+/** Очистить состояние пользователя */
+async function clearState(chatId, env) {
+    await env.DB.prepare(`DELETE FROM states WHERE chat_id = ?`).bind(chatId).run();
+}
 
 /** Получить запись пользователя из БД */
 async function getUser(chatId, env) {
