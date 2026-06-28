@@ -21,7 +21,10 @@ const GEMINI_MODEL = "gemini-2.5-flash-lite-preview-06-17";
 /** Базовый URL Gemini REST API */
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
-/** Дефолтный системный промпт, если персонаж не выбран */
+/**
+ * Дефолтный системный промпт, если персонаж не выбран.
+ * Используется как запасной вариант, если GLOBAL_SYSTEM_PROMPT не задан в env.
+ */
 const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
 
 /** Порог сообщений, после которого запускается сжатие контекста */
@@ -390,9 +393,9 @@ async function handleChat(chatId, userText, env) {
     }
 
     // 2. Определяем активного персонажа и системный промпт
-    let systemPrompt  = DEFAULT_SYSTEM_PROMPT;
-    let characterId   = null;
-    let characterName = "Ассистент";
+    let characterPrompt = DEFAULT_SYSTEM_PROMPT;
+    let characterId     = null;
+    let characterName   = "Ассистент";
 
     if (user.char_id) {
         const char = await env.DB.prepare(
@@ -400,11 +403,14 @@ async function handleChat(chatId, userText, env) {
         ).bind(user.char_id).first();
 
         if (char) {
-            systemPrompt  = char.system_prompt;
-            characterId   = char.id;
-            characterName = char.name;
+            characterPrompt = char.system_prompt;
+            characterId     = char.id;
+            characterName   = char.name;
         }
     }
+
+    // Собираем финальный промпт: глобальный секрет + промпт персонажа
+    const systemPrompt = buildSystemPrompt(characterPrompt, env);
 
     // 3. Сохраняем сообщение пользователя в историю
     await saveMessage(chatId, characterId, "user", userText, env);
@@ -490,6 +496,26 @@ async function callGemini(apiKey, systemPrompt, contents) {
     }
 
     return text;
+}
+
+// ============================================================
+// СБОРКА СИСТЕМНОГО ПРОМПТА
+// ============================================================
+
+/**
+ * Собирает итоговый системный промпт из двух частей:
+ *   1. GLOBAL_SYSTEM_PROMPT — секрет из переменных окружения Cloudflare.
+ *      Задаётся в Dashboard → Workers → Settings → Variables (тип: Secret).
+ *      Пользователи его не видят и не могут изменить.
+ *   2. characterPrompt — промпт конкретного персонажа (или дефолтный).
+ *
+ * Глобальный промпт идёт ПЕРВЫМ, чтобы его правила имели приоритет.
+ * Если GLOBAL_SYSTEM_PROMPT не задан — используется только промпт персонажа.
+ */
+function buildSystemPrompt(characterPrompt, env) {
+    const global = (env.GLOBAL_SYSTEM_PROMPT || "").trim();
+    if (!global) return characterPrompt;
+    return `${global}\n\n---\n\n${characterPrompt}`;
 }
 
 // ============================================================
