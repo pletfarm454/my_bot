@@ -1,7 +1,8 @@
 /**
  * Telegram-бот на Cloudflare Workers + D1 + Gemini API
  * Модель: gemini-3.1-flash-lite
- * ИСПРАВЛЕНО: Стабильная работа кнопок (через includes), перехват ошибок, умная кнопка "Назад".
+ * ИСПРАВЛЕНО: Стабильная работа кнопок, перехват ошибок, умная кнопка "Назад", 
+ * ИСПРАВЛЕНО: Адекватный ретрай при пустых ответах от API.
  */
 
 // ============================================================
@@ -127,10 +128,10 @@ async function handleMessage(message, env) {
     if (text.includes("Галерея")) return await showCharacterList(chatId, "gallery", env);
     if (text.includes("Чат с персонажами")) return await showCharacterList(chatId, "chat", env);
     if (text.includes("Сюжеты")) return await showPlotMenu(chatId, env, "select");
-    
+
     if (text.includes("Настройки")) return await showSettings(chatId, env);
     if (text.includes("Мой статус")) return await showMyStatus(chatId, env);
-    
+
     if (text.includes("Сбросить диалог")) {
         const user = await getUser(chatId, env);
         if (!user?.char_id) {
@@ -189,7 +190,7 @@ async function handleMessage(message, env) {
 async function handleStart(chatId, env) {
     const user = await getUser(chatId, env);
     let welcomeText = `👋 Привет! Я RP-бот с поддержкой персонажей на базе Gemini AI (модель 3.1).\n\n`;
-    
+
     if (!user?.api_key) {
         welcomeText += `🔑 Перед началом работы введи свой API-ключ Gemini:\n<code>/api ВАШ_КЛЮЧ</code>\n\n`;
     } else {
@@ -217,7 +218,7 @@ async function handleHelp(chatId, env) {
         `/cancel — отменить текущее действие\n` +
         `/myid — узнать свой Telegram ID\n` +
         `/api [ключ] — установить API-ключ Gemini`;
-    
+
     await sendMessage(chatId, helpText, mainMenuKeyboard(), env);
 }
 
@@ -246,26 +247,26 @@ async function handleSetApiKey(chatId, apiKey, env) {
 async function showMyStatus(chatId, env) {
     const user = await getUser(chatId, env);
     let statusText = "📋 <b>Твой текущий статус:</b>\n\n";
-    
+
     if (user?.char_id) {
         const char = await env.DB.prepare(`SELECT name FROM characters WHERE id = ?`).bind(user.char_id).first();
         statusText += `🎭 <b>Персонаж:</b> ${char ? escapeHtml(char.name) : "Не найден"}\n`;
     } else {
         statusText += `🎭 <b>Персонаж:</b> Не выбран\n`;
     }
-    
+
     if (user?.plot_id) {
         const plot = await env.DB.prepare(`SELECT name FROM plots WHERE id = ?`).bind(user.plot_id).first();
         statusText += `📖 <b>Сюжет:</b> ${plot ? escapeHtml(plot.name) : "Не найден"}\n`;
     } else {
         statusText += `📖 <b>Сюжет:</b> Не выбран\n`;
     }
-    
+
     statusText += `\n<b>Настройки:</b>\n` +
                   `👤 Имя: ${user?.user_name ? escapeHtml(user.user_name) : "Не задано"}\n` +
                   `🌍 Язык: ${user?.language || "Русский"}\n` +
                   `📏 Длина: ${user?.answer_length || "Средние"}\n`;
-                  
+
     await sendMessage(chatId, statusText, mainMenuKeyboard(), env);
 }
 
@@ -372,11 +373,11 @@ async function handleState(chatId, text, state, env) {
         const name = data.name;
         const description = text;
         const user = await getUser(chatId, env);
-        
+
         const result = await env.DB.prepare(
             `INSERT INTO plots (creator_id, character_id, name, description) VALUES (?, ?, ?, ?)`
         ).bind(chatId, user.char_id, name, description).run();
-        
+
         await env.DB.prepare(`UPDATE users SET plot_id = ? WHERE chat_id = ?`).bind(result.meta.last_row_id, chatId).run();
         await clearState(chatId, env);
 
@@ -405,7 +406,7 @@ async function handleState(chatId, text, state, env) {
 
 async function showSettings(chatId, env) {
     const user = await getUser(chatId, env);
-    
+
     const name = user?.user_name || "Не задано";
     const desc = user?.user_description || "Не задано";
     const lang = user?.language || "Русский";
@@ -517,7 +518,7 @@ async function handleCallbackQuery(callbackQuery, env) {
 }
 
 // ============================================================
-// ОСНОВНАЯ ЛОГИКА ЧАТА С GEMINI (С РЕТРАЕМ ДО 4 ПОПЫТОК)
+// ОСНОВНАЯ ЛОГИКА ЧАТА С GEMINI (ИСПРАВЛЕННЫЙ РЕТРАЙ)
 // ============================================================
 
 async function handleChat(chatId, userText, env) {
@@ -562,33 +563,31 @@ async function handleChat(chatId, userText, env) {
          ORDER BY timestamp ASC`
     ).bind(chatId, characterId, characterId).all();
 
-    let currentContents = (history.results || [])
+    const currentContents = (history.results || [])
         .map(row => ({ role: row.role, parts: [{ text: row.text }] }));
-        
-    let currentSystemPrompt = systemPrompt;
+
     let botReply = "";
 
     await sendChatAction(chatId, "typing", env);
 
+    // ИСПРАВЛЕННЫЙ ЦИКЛ: делаем до 4 попыток, отправляя ИДЕ НТИЧНЫЙ запрос
     for (let attempt = 1; attempt <= 4; attempt++) {
         try {
-            botReply = await callGemini(user.api_key, currentSystemPrompt, currentContents);
+            botReply = await callGemini(user.api_key, systemPrompt, currentContents);
         } catch (e) {
+            // Если это реальная ошибка API (не пустой ответ), сразу выходим
             await sendMessage(chatId, `❌ Ошибка при запросе к Gemini:\n<code>${escapeHtml(String(e))}</code>`, null, env);
             return;
         }
 
+        // Если получили нормальный ответ — прерываем цикл
         if (botReply) break;
 
-        console.log(`Попытка ${attempt}: пустой ответ от Gemini. Модифицируем запрос...`);
+        console.log(`Попытка ${attempt}: пустой ответ от Gemini. Пробуем снова без изменения запроса...`);
         
-        if (attempt === 1) {
-            const lastMsgIndex = currentContents.length - 1;
-            if (currentContents[lastMsgIndex] && currentContents[lastMsgIndex].role === "user") {
-                currentContents[lastMsgIndex].parts[0].text = 
-                    currentSystemPrompt + "\n\n" + currentContents[lastMsgIndex].parts[0].text;
-            }
-            currentSystemPrompt = ""; 
+        // Небольшая пауза перед следующей попыткой (500мс), чтобы не спамить API при микрозадержках
+        if (attempt < 4) {
+            await new Promise(resolve => setTimeout(resolve, 500));
         }
     }
 
@@ -632,7 +631,7 @@ async function callGemini(apiKey, systemPrompt, contents) {
 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    
+
     if (!text) return null;
 
     return text;
@@ -644,17 +643,17 @@ async function callGemini(apiKey, systemPrompt, contents) {
 
 function buildSystemPrompt(characterPrompt, user, env) {
     const global = (env.GLOBAL_SYSTEM_PROMPT || "").trim();
-    
+
     let userSettings = "";
     if (user) {
         userSettings += "\n\n--- НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ---\n";
         if (user.user_name) userSettings += `Обращайся к пользователю по имени: ${user.user_name}.\n`;
         if (user.user_description) userSettings += `Информация о пользователе: ${user.user_description}\n`;
-        
+
         const langMap = { "Русский": "ru", "English": "en", "Español": "es" };
         const langCode = langMap[user.language] || "ru";
         userSettings += `Отвечай на языке: ${user.language} (${langCode}).\n`;
-        
+
         let lengthRule = "";
         if (user.answer_length === "Очень короткие") {
             lengthRule = "Отвечай как живой человек в мессенджере: буквально несколько слов или одно очень короткое предложение. Никогда не пиши длинные тексты.";
@@ -670,7 +669,7 @@ function buildSystemPrompt(characterPrompt, user, env) {
 
     let finalPrompt = characterPrompt + userSettings;
     if (global) finalPrompt = `${global}\n\n---\n\n${finalPrompt}`;
-    
+
     return finalPrompt;
 }
 
@@ -945,4 +944,4 @@ function hideKeyboard() {
 
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+        }
