@@ -1,9 +1,7 @@
 /**
  * Telegram-бот на Cloudflare Workers + D1 + Gemini API
  * Модель: gemini-3.1-flash-lite
- * Добавлены: Сюжеты, 4 попытки при пустом ответе, индикатор печати, разделение длинных сообщений, кнопки статуса и сброса.
- * Добавлена длина ответов "Очень короткие".
- * ИСПРАВЛЕНО: Зависание кнопок и долгий отклик (через ctx.waitUntil).
+ * ИСПРАВЛЕНО: Стабильная работа кнопок (через includes), перехват ошибок, умная кнопка "Назад".
  */
 
 // ============================================================
@@ -28,8 +26,7 @@ export default {
 
         try {
             const update = await request.json();
-            // ВАЖНО: Запускаем обработку в фоне, чтобы мгновенно ответить Telegram 200 OK
-            // Это предотвращает зависание кнопок и долгие ожидания.
+            // Запускаем обработку в фоне, чтобы мгновенно ответить Telegram 200 OK
             ctx.waitUntil(handleUpdate(update, env));
         } catch (e) {
             console.error("Ошибка инициализации:", e);
@@ -40,18 +37,27 @@ export default {
 };
 
 // ============================================================
-// ГЛАВНЫЙ ДИСПЕТЧЕР ОБНОВЛЕНИЙ
+// ГЛАВНЫЙ ДИСПЕТЧЕР ОБНОВЛЕНИЙ (С ПЕРЕХВАТОМ ОШИБОК)
 // ============================================================
 
 async function handleUpdate(update, env) {
-    if (update.callback_query) {
-        await handleCallbackQuery(update.callback_query, env);
-        return;
-    }
+    try {
+        if (update.callback_query) {
+            await handleCallbackQuery(update.callback_query, env);
+            return;
+        }
 
-    if (update.message) {
-        await handleMessage(update.message, env);
-        return;
+        if (update.message) {
+            await handleMessage(update.message, env);
+            return;
+        }
+    } catch (e) {
+        console.error("Глобальная ошибка обработки:", e);
+        // Если произошла ошибка, сообщаем пользователю, чтобы кнопки не "молчали"
+        let chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
+        if (chatId) {
+            await sendMessage(chatId, `❌ Произошла внутренняя ошибка:\n<code>${escapeHtml(String(e))}</code>`, null, env);
+        }
     }
 }
 
@@ -72,25 +78,33 @@ async function handleMessage(message, env) {
         return;
     }
 
-    if (text === "/help" || text.startsWith("/help")) {
+    if (text.startsWith("/help")) {
         await handleHelp(chatId, env);
         return;
     }
 
-    if (text === "/myid") {
+    if (text.startsWith("/myid")) {
         await sendMessage(chatId, `Твой Telegram ID: <code>${chatId}</code>`, null, env);
         return;
     }
 
     if (text.startsWith("/api ")) {
-        await handleSetApiKey(chatId, text.slice(5).trim(), env);
+        let apiKey = text.slice(5).trim();
+        apiKey = apiKey.replace(/\s+/g, ""); // Удаляем все пробелы из ключа
+        await handleSetApiKey(chatId, apiKey, env);
         return;
     }
 
     // --- Кнопки выхода (работают ВСЕГДА, даже если бот ждал ввод текста) ---
-    if (text === "/cancel" || text === "🔙 Главное меню" || text === "🔙 Назад") {
+    if (text.startsWith("/cancel") || text.includes("Главное меню")) {
         await clearState(chatId, env);
         await sendMessage(chatId, "🏠 Главное меню", mainMenuKeyboard(), env);
+        return;
+    }
+
+    if (text.includes("Назад")) {
+        await clearState(chatId, env);
+        await showSettings(chatId, env); // Умная кнопка "Назад" возвращает в настройки
         return;
     }
 
@@ -101,23 +115,23 @@ async function handleMessage(message, env) {
         return;
     }
 
-    // --- Навигация по Reply-кнопкам ---
-    if (text === "➕ Создать персонажа") {
+    // --- Навигация по Reply-кнопкам (используем includes для стабильности) ---
+    if (text.includes("Создать персонажа")) {
         await sendMessage(chatId, "➕ <b>Создание персонажа</b>\n\nКак хочешь создать?", createMenuKeyboard(), env);
         return;
     }
 
-    if (text === "✏️ Вручную") return await startCreateWizard(chatId, env);
-    if (text === "🤖 Сгенерировать AI") return await startGenWizard(chatId, env);
+    if (text.includes("Вручную")) return await startCreateWizard(chatId, env);
+    if (text.includes("Сгенерировать AI")) return await startGenWizard(chatId, env);
 
-    if (text === "🖼️ Галерея") return await showCharacterList(chatId, "gallery", env);
-    if (text === "💬 Чат с персонажами") return await showCharacterList(chatId, "chat", env);
-    if (text === "🎭 Сюжеты") return await showPlotMenu(chatId, env, "select");
+    if (text.includes("Галерея")) return await showCharacterList(chatId, "gallery", env);
+    if (text.includes("Чат с персонажами")) return await showCharacterList(chatId, "chat", env);
+    if (text.includes("Сюжеты")) return await showPlotMenu(chatId, env, "select");
     
-    if (text === "⚙️ Настройки") return await showSettings(chatId, env);
-    if (text === "📋 Мой статус") return await showMyStatus(chatId, env);
+    if (text.includes("Настройки")) return await showSettings(chatId, env);
+    if (text.includes("Мой статус")) return await showMyStatus(chatId, env);
     
-    if (text === "🔄 Сбросить диалог") {
+    if (text.includes("Сбросить диалог")) {
         const user = await getUser(chatId, env);
         if (!user?.char_id) {
             await sendMessage(chatId, "❌ У тебя не выбран персонаж для сброса диалога.", null, env);
@@ -128,37 +142,38 @@ async function handleMessage(message, env) {
         return;
     }
 
-    if (text === "✏️ Изменить имя") {
+    if (text.includes("Изменить имя")) {
         await setState(chatId, "set_user_name", {}, env);
         await sendMessage(chatId, "✏️ Введи имя, которое бот будет использовать для тебя (или /cancel):", hideKeyboard(), env);
         return;
     }
 
-    if (text === "📝 Изменить описание") {
+    if (text.includes("Изменить описание")) {
         await setState(chatId, "set_user_desc", {}, env);
         await sendMessage(chatId, "📝 Опиши себя (характер, внешность, как бот должен к тебе относиться). Или /cancel:", hideKeyboard(), env);
         return;
     }
 
-    if (text === "🌐 Язык ответов") {
+    if (text.includes("Язык ответов")) {
         await sendMessage(chatId, "Выбери язык ответов:", languageMenuKeyboard(), env);
         return;
     }
 
-    if (text === "📏 Длина ответов") {
+    if (text.includes("Длина ответов")) {
         await sendMessage(chatId, "Выбери длину ответов:", lengthMenuKeyboard(), env);
         return;
     }
 
-    if (text === "🇷🇺 Русский" || text === "🇬🇧 English" || text === "🇪🇸 Español") {
+    if (text.includes("Русский") || text.includes("English") || text.includes("Español")) {
         const lang = text.split(" ")[1];
         await updateUserField(chatId, "language", lang, env);
         await showSettings(chatId, env);
         return;
     }
 
-    if (text === "⚡️ Очень короткие" || text === "Короткие" || text === "Средние" || text === "Длинные") {
-        await updateUserField(chatId, "answer_length", text, env);
+    if (text.includes("Очень короткие") || text.includes("Короткие") || text.includes("Средние") || text.includes("Длинные")) {
+        let lengthVal = text.replace(/⚡️|📏/g, "").trim();
+        await updateUserField(chatId, "answer_length", lengthVal, env);
         await showSettings(chatId, env);
         return;
     }
@@ -641,7 +656,7 @@ function buildSystemPrompt(characterPrompt, user, env) {
         userSettings += `Отвечай на языке: ${user.language} (${langCode}).\n`;
         
         let lengthRule = "";
-        if (user.answer_length === "⚡️ Очень короткие") {
+        if (user.answer_length === "Очень короткие") {
             lengthRule = "Отвечай как живой человек в мессенджере: буквально несколько слов или одно очень короткое предложение. Никогда не пиши длинные тексты.";
         } else if (user.answer_length === "Короткие") {
             lengthRule = "Твои ответы должны быть очень краткими (1-2 предложения).";
@@ -930,4 +945,4 @@ function hideKeyboard() {
 
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-                      }
+}
