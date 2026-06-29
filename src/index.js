@@ -3,6 +3,7 @@
  * Модель: gemini-3.1-flash-lite
  * Добавлены: Сюжеты, 4 попытки при пустом ответе, индикатор печати, разделение длинных сообщений, кнопки статуса и сброса.
  * Добавлена длина ответов "Очень короткие".
+ * ИСПРАВЛЕНО: Зависание кнопок и долгий отклик (через ctx.waitUntil).
  */
 
 // ============================================================
@@ -20,16 +21,18 @@ const COMPRESS_COUNT = 20;
 // ============================================================
 
 export default {
-    async fetch(request, env) {
+    async fetch(request, env, ctx) {
         if (request.method !== "POST") {
             return new Response("OK", { status: 200 });
         }
 
         try {
             const update = await request.json();
-            await handleUpdate(update, env);
+            // ВАЖНО: Запускаем обработку в фоне, чтобы мгновенно ответить Telegram 200 OK
+            // Это предотвращает зависание кнопок и долгие ожидания.
+            ctx.waitUntil(handleUpdate(update, env));
         } catch (e) {
-            console.error("Ошибка обработки обновления:", e);
+            console.error("Ошибка инициализации:", e);
         }
 
         return new Response("OK", { status: 200 });
@@ -74,9 +77,8 @@ async function handleMessage(message, env) {
         return;
     }
 
-    if (text === "/cancel") {
-        await clearState(chatId, env);
-        await sendMessage(chatId, "❌ Отменено.", mainMenuKeyboard(), env);
+    if (text === "/myid") {
+        await sendMessage(chatId, `Твой Telegram ID: <code>${chatId}</code>`, null, env);
         return;
     }
 
@@ -85,8 +87,10 @@ async function handleMessage(message, env) {
         return;
     }
 
-    if (text === "/myid") {
-        await sendMessage(chatId, `Твой Telegram ID: <code>${chatId}</code>`, null, env);
+    // --- Кнопки выхода (работают ВСЕГДА, даже если бот ждал ввод текста) ---
+    if (text === "/cancel" || text === "🔙 Главное меню" || text === "🔙 Назад") {
+        await clearState(chatId, env);
+        await sendMessage(chatId, "🏠 Главное меню", mainMenuKeyboard(), env);
         return;
     }
 
@@ -153,16 +157,9 @@ async function handleMessage(message, env) {
         return;
     }
 
-    // Обработка выбора длины (включая новую "Очень короткие")
     if (text === "⚡️ Очень короткие" || text === "Короткие" || text === "Средние" || text === "Длинные") {
         await updateUserField(chatId, "answer_length", text, env);
         await showSettings(chatId, env);
-        return;
-    }
-
-    if (text === "🔙 Главное меню" || text === "🔙 Назад") {
-        await clearState(chatId, env);
-        await sendMessage(chatId, "🏠 Главное меню", mainMenuKeyboard(), env);
         return;
     }
 
@@ -350,7 +347,6 @@ async function handleState(chatId, text, state, env) {
         return;
     }
 
-    // --- СОЗДАНИЕ СЮЖЕТА ---
     if (step === "create_plot_name") {
         await setState(chatId, "create_plot_desc", { name: text }, env);
         await sendMessage(chatId, `✏️ Сюжет: <b>${escapeHtml(text)}</b>\n\nШаг 2/2: Введи <b>описание</b> сюжета.\nОпиши сеттинг, место действия, предысторию или текущую ситуацию.\n\n/cancel — отменить`, null, env);
@@ -460,9 +456,8 @@ async function handleCallbackQuery(callbackQuery, env) {
 
     await answerCallbackQuery(callbackQuery.id, env);
 
-    if (data === "ignore") return;
+    if (data === "ignore" || data === "close_list") return;
 
-    // --- Персонажи ---
     if (data.startsWith("select_char:")) {
         await handleSelectCharacter(chatId, parseInt(data.split(":")[1]), env);
         return;
@@ -473,7 +468,6 @@ async function handleCallbackQuery(callbackQuery, env) {
         return;
     }
 
-    // --- Сюжеты ---
     if (data === "select_plot_menu") {
         await showPlotMenu(chatId, env, "select");
         return;
@@ -559,10 +553,8 @@ async function handleChat(chatId, userText, env) {
     let currentSystemPrompt = systemPrompt;
     let botReply = "";
 
-    // Отправляем индикатор набора текста
     await sendChatAction(chatId, "typing", env);
 
-    // Делаем до 4 попыток получить ответ
     for (let attempt = 1; attempt <= 4; attempt++) {
         try {
             botReply = await callGemini(user.api_key, currentSystemPrompt, currentContents);
@@ -813,10 +805,9 @@ async function handleDeleteCharacter(chatId, charId, env) {
 // ============================================================
 
 async function sendMessage(chatId, text, replyMarkup, env) {
-    const maxLen = 4000; // Немного меньше лимита Telegram с запасом на HTML теги
+    const maxLen = 4000; 
     let messagesToSend = [];
 
-    // Разбиваем длинный текст на части
     if (text.length > maxLen) {
         let str = text;
         while (str.length > maxLen) {
@@ -835,7 +826,6 @@ async function sendMessage(chatId, text, replyMarkup, env) {
         messagesToSend.push(text);
     }
 
-    // Отправляем по очереди
     for (let i = 0; i < messagesToSend.length; i++) {
         const isLast = i === messagesToSend.length - 1;
         const url  = `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`;
@@ -844,7 +834,6 @@ async function sendMessage(chatId, text, replyMarkup, env) {
             text: messagesToSend[i],
             parse_mode: "HTML"
         };
-        // Клавиатуру прикрепляем только к последнему сообщению
         if (isLast && replyMarkup) body.reply_markup = replyMarkup;
 
         const res = await fetch(url, {
@@ -941,4 +930,4 @@ function hideKeyboard() {
 
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+                      }
