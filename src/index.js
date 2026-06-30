@@ -4,6 +4,7 @@
  * СТАБИЛЬНАЯ ВЕРСИЯ: Устранены падения при блокировках безопасности,
  * решена проблема с чередованием ролей, оптимизирована работа с SQLite.
  * ИСПРАВЛЕНО: ReferenceError maxTokens, улучшена регулировка длины ответов.
+ * ДОБАВЛЕНО: Динамическая работа с сюжетами, команды /clear, /plot, /plots
  */
 
 // ============================================================
@@ -13,11 +14,10 @@
 const GEMINI_MODEL = "gemini-2.5-flash";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
-const COMPRESS_THRESHOLD = 25;
+const COMPRESS_THRESHOLD = 50; // Увеличено с 25 для лучшего запоминания
 const COMPRESS_COUNT = 20;
 
 // Лимиты токенов под каждую настройку длины ответа.
-// Скорректированы для более точного контроля.
 const LENGTH_TOKEN_MAP = {
     "Очень короткие": 10000,
     "Короткие": 10000,
@@ -34,7 +34,7 @@ const LENGTH_FAKE_LIMIT_MAP = {
 
 const DEFAULT_MAX_TOKENS = LENGTH_TOKEN_MAP["Средние"];
 
-// Текстовые правила длины — вынесены в отдельный объект для чистоты кода
+// Текстовые правила длины
 const LENGTH_RULE_MAP = {
     "Очень короткие": () =>
         `СТРОГОЕ ПРАВИЛО ДЛИНЫ: Отвечай максимально кратко — как живой человек в мессенджере. ` +
@@ -132,6 +132,60 @@ async function handleMessage(message, env) {
         let apiKey = text.slice(5).trim();
         apiKey = apiKey.replace(/\s+/g, "");
         await handleSetApiKey(chatId, apiKey, env);
+        return;
+    }
+
+    // --- НОВЫЕ КОМАНДЫ ДЛЯ РАБОТЫ С СЮЖЕТАМИ ---
+    if (text.startsWith("/clear") || text.startsWith("/reset")) {
+        const user = await getUser(chatId, env);
+        if (!user?.char_id) {
+            await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
+            return;
+        }
+        await clearContext(chatId, user.char_id, env);
+        await sendMessage(chatId, "✅ История диалога очищена. Можно начинать сначала!", mainMenuKeyboard(), env);
+        return;
+    }
+
+    if (text.startsWith("/plot ")) {
+        const plotName = text.slice(6).trim();
+        if (!plotName) {
+            await sendMessage(chatId, "❌ Укажи название сюжета. Пример: /plot Мой новый сюжет", null, env);
+            return;
+        }
+        
+        const user = await getUser(chatId, env);
+        if (!user?.char_id) {
+            await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
+            return;
+        }
+        
+        // Ищем сюжет по названию
+        const plot = await env.DB.prepare(
+            `SELECT id FROM plots WHERE name LIKE ? AND character_id = ? AND creator_id = ?`
+        ).bind(`%${plotName}%`, user.char_id, chatId).first();
+        
+        if (!plot) {
+            await sendMessage(chatId, `❌ Сюжет "${plotName}" не найден. Используй /plots чтобы увидеть список.`, null, env);
+            return;
+        }
+        
+        await env.DB.prepare(`UPDATE users SET plot_id = ? WHERE chat_id = ?`).bind(plot.id, chatId).run();
+        
+        // Очищаем контекст при смене сюжета для чистоты
+        await clearContext(chatId, user.char_id, env);
+        
+        await sendMessage(chatId, `✅ Сюжет "${plotName}" выбран! История диалога очищена для нового сюжета.`, mainMenuKeyboard(), env);
+        return;
+    }
+
+    if (text.startsWith("/plots")) {
+        const user = await getUser(chatId, env);
+        if (!user?.char_id) {
+            await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
+            return;
+        }
+        await showPlotMenu(chatId, env, "select");
         return;
     }
 
@@ -257,7 +311,10 @@ async function handleHelp(chatId, env) {
         `/help — показать это сообщение\n` +
         `/cancel — отменить текущее действие\n` +
         `/myid — узнать свой Telegram ID\n` +
-        `/api [ключ] — установить API-ключ Gemini`;
+        `/api [ключ] — установить API-ключ Gemini\n` +
+        `/clear — очистить историю диалога\n` +
+        `/plot [название] — выбрать сюжет по названию\n` +
+        `/plots — показать список сюжетов`;
 
     await sendMessage(chatId, helpText, mainMenuKeyboard(), env);
 }
@@ -541,8 +598,15 @@ async function handleCallbackQuery(callbackQuery, env) {
     }
     if (data.startsWith("select_plot:")) {
         const plotId = parseInt(data.split(":")[1]);
+        const user = await getUser(chatId, env);
         await env.DB.prepare(`UPDATE users SET plot_id = ? WHERE chat_id = ?`).bind(plotId, chatId).run();
-        await sendMessage(chatId, "✅ Сюжет выбран! Теперь он будет учитываться в диалоге.", null, env);
+        
+        // Очищаем контекст при выборе сюжета через кнопку
+        if (user?.char_id) {
+            await clearContext(chatId, user.char_id, env);
+        }
+        
+        await sendMessage(chatId, "✅ Сюжет выбран! История диалога очищена для нового сюжета.", null, env);
         return;
     }
     if (data.startsWith("delete_plot:")) {
@@ -611,10 +675,15 @@ async function handleChat(chatId, userText, env) {
         }
     }
 
+    // --- ОБНОВЛЕННАЯ ЛОГИКА ДОБАВЛЕНИЯ СЮЖЕТА ---
     if (user.plot_id) {
         const plot = await env.DB.prepare(`SELECT name, description FROM plots WHERE id = ? AND creator_id = ?`).bind(user.plot_id, chatId).first();
         if (plot) {
-            characterPrompt += `\n\n--- ТЕКУЩИЙ СЮЖЕТ ---\nНазвание: ${plot.name}\nОписание сюжета: ${plot.description}\nОтыгрывай этот сюжет в диалоге.`;
+            // Более гибкая интеграция сюжета как исходной точки
+            characterPrompt += `\n\n[ИСХОДНЫЙ СЮЖЕТ: "${plot.name}". Описание: "${plot.description}". ` +
+                               `Используй это как основу мира и предысторию. ` +
+                               `Развивай сюжет динамически, основываясь на действиях пользователя и истории диалога. ` +
+                               `Не повторяй описание сюжета в каждом ответе - просто отыгрывай его.]`;
         }
     }
 
@@ -739,15 +808,12 @@ function buildSystemPrompt(characterPrompt, user, env) {
         const langCode = langMap[userLanguage] || "ru";
         userSettings += `Отвечай на языке: ${userLanguage} (${langCode}).\n`;
 
-        // === ИСПРАВЛЕНИЕ: получаем лимит токенов из карты ===
         const maxTokens = LENGTH_TOKEN_MAP[user.answer_length] || DEFAULT_MAX_TOKENS;
 
-        // === ИСПРАВЛЕНИЕ: используем LENGTH_RULE_MAP для получения текстового правила ===
         const lengthKey = user.answer_length || "Средние";
         const ruleFn = LENGTH_RULE_MAP[lengthKey] || LENGTH_RULE_MAP["Средние"];
         const lengthRule = ruleFn(maxTokens);
 
-        // === ИСПРАВЛЕНИЕ: lengthRule теперь действительно добавляется в промпт ===
         userSettings += lengthRule + "\n";
     }
 
@@ -847,7 +913,12 @@ async function saveMessage(chatId, characterId, role, text, env) {
 }
 
 async function clearContext(chatId, characterId, env) {
-    await env.DB.prepare(`DELETE FROM messages WHERE chat_id = ? AND character_id = ?`).bind(chatId, characterId).run();
+    if (characterId) {
+        await env.DB.prepare(`DELETE FROM messages WHERE chat_id = ? AND character_id = ?`).bind(chatId, characterId).run();
+    } else {
+        // Если персонаж не выбран, очищаем все сообщения
+        await env.DB.prepare(`DELETE FROM messages WHERE chat_id = ?`).bind(chatId).run();
+    }
 }
 
 // ============================================================
