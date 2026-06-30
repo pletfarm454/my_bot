@@ -1,10 +1,8 @@
 /**
  * Telegram-бот на Cloudflare Workers + D1 + Gemini API
  * Модель: gemini-2.5-flash-lite
- * ИСПРАВЛЕНО: Стабильная работа кнопок, перехват ошибок, умная кнопка "Назад", 
- * ИСПРАВЛЕНО: Адекватный ретрай при пустых ответах от API.
- * ИСПРАВЛЕНО: Длина ответов теперь принудительно ограничивается через maxOutputTokens,
- *             а не только текстовой инструкцией в system prompt.
+ * СТАБИЛЬНАЯ ВЕРСИЯ: Устранены падения при блокировках безопасности,
+ * решена проблема с чередованием ролей, оптимизирована работа с SQLite.
  */
 
 // ============================================================
@@ -18,9 +16,6 @@ const COMPRESS_THRESHOLD = 25;
 const COMPRESS_COUNT = 20;
 
 // Жёсткие лимиты токенов под каждую настройку длины ответа.
-// Это подкрепляет текстовую инструкцию реальным ограничением API,
-// поэтому модель физически не может написать длиннее, даже если
-// проигнорирует словесную просьбу о краткости.
 const LENGTH_TOKEN_MAP = {
     "Очень короткие": 60,
     "Короткие": 150,
@@ -68,10 +63,14 @@ async function handleUpdate(update, env) {
         }
     } catch (e) {
         console.error("Глобальная ошибка обработки:", e);
-        // Если произошла ошибка, сообщаем пользователю, чтобы кнопки не "молчали"
-        let chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
+        // Безопасная попытка уведомить пользователя в случае внутренней ошибки
+        let chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id || update.callback_query?.from?.id;
         if (chatId) {
-            await sendMessage(chatId, `❌ Произошла внутренняя ошибка:\n<code>${escapeHtml(String(e))}</code>`, null, env);
+            try {
+                await sendMessage(chatId, `❌ Произошла внутренняя ошибка:\n<code>${escapeHtml(String(e))}</code>`, null, env);
+            } catch (err) {
+                console.error("Не удалось отправить сообщение об ошибке пользователю:", err);
+            }
         }
     }
 }
@@ -130,7 +129,7 @@ async function handleMessage(message, env) {
         return;
     }
 
-    // --- Навигация по Reply-кнопкам (используем includes для стабильности) ---
+    // --- Навигация по Reply-кнопкам ---
     if (text.includes("Создать персонажа")) {
         await sendMessage(chatId, "➕ <b>Создание персонажа</b>\n\nКак хочешь создать?", createMenuKeyboard(), env);
         return;
@@ -180,7 +179,8 @@ async function handleMessage(message, env) {
     }
 
     if (text.includes("Русский") || text.includes("English") || text.includes("Español")) {
-        const lang = text.split(" ")[1];
+        const parts = text.split(" ");
+        const lang = parts.length > 1 ? parts[1] : parts[0];
         await updateUserField(chatId, "language", lang, env);
         await showSettings(chatId, env);
         return;
@@ -358,8 +358,6 @@ async function handleState(chatId, text, state, env) {
 
         let description = "";
         try {
-            // Генерация описания персонажа — отдельный лимит токенов, побольше,
-            // т.к. это не "ответ" в чате, а полноценное описание.
             description = await callGemini(user.api_key, genSystemPrompt, genContents, 800);
         } catch (e) {
             await clearState(chatId, env);
@@ -483,7 +481,7 @@ async function showPlotMenu(chatId, env, mode = "select") {
 // ============================================================
 
 async function handleCallbackQuery(callbackQuery, env) {
-    const chatId = callbackQuery.message.chat.id;
+    const chatId = callbackQuery.message?.chat?.id || callbackQuery.from.id;
     const data   = callbackQuery.data || "";
 
     await answerCallbackQuery(callbackQuery.id, env);
@@ -518,7 +516,7 @@ async function handleCallbackQuery(callbackQuery, env) {
     if (data.startsWith("select_plot:")) {
         const plotId = parseInt(data.split(":")[1]);
         await env.DB.prepare(`UPDATE users SET plot_id = ? WHERE chat_id = ?`).bind(plotId, chatId).run();
-        await sendMessage(chatId, "✅ Сюжет выбран! Теперь он будет учитывать в диалоге.", null, env);
+        await sendMessage(chatId, "✅ Сюжет выбран! Теперь он будет учитываться в диалоге.", null, env);
         return;
     }
     if (data.startsWith("delete_plot:")) {
@@ -534,7 +532,41 @@ async function handleCallbackQuery(callbackQuery, env) {
 }
 
 // ============================================================
-// ОСНОВНАЯ ЛОГИКА ЧАТА С GEMINI (ИСПРАВЛЕННЫЙ РЕТРАЙ + ЖЁСТКАЯ ДЛИНА)
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПОДГОТОВКИ ДИАЛОГА GEMINI
+// ============================================================
+
+/**
+ * Приведение истории диалога к стандартам Gemini API.
+ * 1. Чередует сообщения строго в формате user -> model.
+ * 2. Склеивает идущие подряд сообщения от одного автора.
+ * 3. Обеспечивает, что диалог всегда начинается с роли user.
+ */
+function prepareContents(historyResults) {
+    if (!historyResults || historyResults.length === 0) return [];
+    
+    const contents = [];
+    for (const row of historyResults) {
+        const role = row.role === "model" ? "model" : "user";
+        const text = row.text || "";
+        
+        if (contents.length > 0 && contents[contents.length - 1].role === role) {
+            // Если роль совпадает с предыдущей — склеиваем сообщения в одно
+            contents[contents.length - 1].parts[0].text += "\n" + text;
+        } else {
+            contents.push({ role, parts: [{ text }] });
+        }
+    }
+    
+    // API Gemini требует, чтобы диалог всегда начинался с "user"
+    while (contents.length > 0 && contents[0].role !== "user") {
+        contents.shift();
+    }
+    
+    return contents;
+}
+
+// ============================================================
+// ОСНОВНАЯ ЛОГИКА ЧАТА С GEMINI
 // ============================================================
 
 async function handleChat(chatId, userText, env) {
@@ -576,35 +608,35 @@ async function handleChat(chatId, userText, env) {
     await saveMessage(chatId, characterId, "user", userText, env);
     await maybeCompressContext(chatId, characterId, user.api_key, systemPrompt, env);
 
+    // Запрос истории с использованием оптимизированного SQLite-оператора IS для nullable characterId
     const history = await env.DB.prepare(
         `SELECT role, text FROM messages
-         WHERE chat_id = ? AND (character_id = ? OR (character_id IS NULL AND ? IS NULL))
+         WHERE chat_id = ? AND character_id IS ?
          ORDER BY timestamp ASC`
-    ).bind(chatId, characterId, characterId).all();
+    ).bind(chatId, characterId).all();
 
-    const currentContents = (history.results || [])
-        .map(row => ({ role: row.role, parts: [{ text: row.text }] }));
+    const currentContents = prepareContents(history.results || []);
 
     let botReply = "";
 
     await sendChatAction(chatId, "typing", env);
 
-    // ИСПРАВЛЕННЫЙ ЦИКЛ: делаем до 4 попыток, отправляя ИДЕНТИЧНЫЙ запрос
+    // Цикл попыток: до 4 попыток, если API возвращает пустой результат без ошибок.
+    // Если происходит блокировка безопасности (SAFETY), выбрасывается исключение, и цикл сразу прерывается.
     for (let attempt = 1; attempt <= 4; attempt++) {
         try {
             botReply = await callGemini(user.api_key, systemPrompt, currentContents, maxTokens);
         } catch (e) {
-            // Если это реальная ошибка API (не пустой ответ), сразу выходим
+            // Если это реальная ошибка (включая блокировку фильтром), выводим её пользователю без ретраев
             await sendMessage(chatId, `❌ Ошибка при запросе к Gemini:\n<code>${escapeHtml(String(e))}</code>`, null, env);
             return;
         }
 
-        // Если получили нормальный ответ — прерываем цикл
+        // Если получили содержательный ответ — завершаем цикл
         if (botReply) break;
 
-        console.log(`Попытка ${attempt}: пустой ответ от Gemini. Пробуем снова без изменения запроса...`);
+        console.log(`Попытка ${attempt}: пустой ответ от Gemini. Пробуем снова...`);
         
-        // Небольшая пауза перед следующей попыткой (500мс), чтобы не спамить API при микрозадержках
         if (attempt < 4) {
             await new Promise(resolve => setTimeout(resolve, 500));
         }
@@ -632,10 +664,6 @@ async function callGemini(apiKey, systemPrompt, contents, maxOutputTokens) {
         contents,
         generationConfig: {
             temperature: 0.9,
-            // Принудительный лимит токенов — основной фикс. Раньше длина
-            // регулировалась только текстовой инструкцией в system prompt,
-            // и модель могла её игнорировать. Теперь API физически обрезает
-            // ответ по достижении лимита, соответствующего выбранной длине.
             maxOutputTokens: maxOutputTokens || DEFAULT_MAX_TOKENS,
         },
     };
@@ -656,7 +684,26 @@ async function callGemini(apiKey, systemPrompt, contents, maxOutputTokens) {
     }
 
     const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    // Проверка, заблокирован ли сам промпт фильтрами Google
+    if (data?.promptFeedback?.blockReason) {
+        throw new Error(`Запрос заблокирован по соображениям безопасности (Причина: ${data.promptFeedback.blockReason})`);
+    }
+
+    const candidate = data?.candidates?.[0];
+    
+    // Проверка причин прерывания генерации ответов (блокировки по безопасности)
+    if (candidate?.finishReason && candidate.finishReason !== "STOP" && candidate.finishReason !== "MAX_TOKENS") {
+        if (candidate.finishReason === "SAFETY") {
+            throw new Error("Ответ заблокирован фильтром безопасности Gemini. Пожалуйста, смените тему.");
+        }
+        if (candidate.finishReason === "RECITATION") {
+            throw new Error("Ответ заблокирован из-за совпадения с защищенным авторским правом текстом (RECITATION).");
+        }
+        throw new Error(`Генерация прервана API (Причина: ${candidate.finishReason})`);
+    }
+
+    const text = candidate?.content?.parts?.[0]?.text;
 
     if (!text) return null;
 
@@ -677,8 +724,9 @@ function buildSystemPrompt(characterPrompt, user, env) {
         if (user.user_description) userSettings += `Информация о пользователе: ${user.user_description}\n`;
 
         const langMap = { "Русский": "ru", "English": "en", "Español": "es" };
-        const langCode = langMap[user.language] || "ru";
-        userSettings += `Отвечай на языке: ${user.language} (${langCode}).\n`;
+        const userLanguage = user.language || "Русский";
+        const langCode = langMap[userLanguage] || "ru";
+        userSettings += `Отвечай на языке: ${userLanguage} (${langCode}).\n`;
 
         let lengthRule = "";
         if (user.answer_length === "Очень короткие") {
@@ -706,17 +754,17 @@ function buildSystemPrompt(characterPrompt, user, env) {
 async function maybeCompressContext(chatId, characterId, apiKey, systemPrompt, env) {
     const countRow = await env.DB.prepare(
         `SELECT COUNT(*) as cnt FROM messages
-         WHERE chat_id = ? AND (character_id = ? OR (character_id IS NULL AND ? IS NULL))`
-    ).bind(chatId, characterId, characterId).first();
+         WHERE chat_id = ? AND character_id IS ?`
+    ).bind(chatId, characterId).first();
 
     const totalCount = countRow?.cnt ?? 0;
     if (totalCount <= COMPRESS_THRESHOLD) return;
 
     const oldRows = await env.DB.prepare(
         `SELECT id, role, text FROM messages
-         WHERE chat_id = ? AND (character_id = ? OR (character_id IS NULL AND ? IS NULL))
+         WHERE chat_id = ? AND character_id IS ?
          ORDER BY timestamp ASC, id ASC LIMIT ?`
-    ).bind(chatId, characterId, characterId, COMPRESS_COUNT).all();
+    ).bind(chatId, characterId, COMPRESS_COUNT).all();
 
     const oldMessages = oldRows.results || [];
     if (oldMessages.length === 0) return;
@@ -726,7 +774,6 @@ async function maybeCompressContext(chatId, characterId, apiKey, systemPrompt, e
 
     let summary = "";
     try {
-        // Резюме — не финальный ответ пользователю, поэтому отдельный больший лимит токенов.
         summary = await callGemini(apiKey, systemPrompt, [{ role: "user", parts: [{ text: compressionPrompt }] }], 500);
     } catch (e) {
         return;
@@ -971,4 +1018,4 @@ function hideKeyboard() {
 
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+    }
