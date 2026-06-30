@@ -189,7 +189,7 @@ async function handleMessage(message, env) {
 
 async function handleStart(chatId, env) {
     const user = await getUser(chatId, env);
-    let welcomeText = `👋 Привет! Я RP-бот с поддержкой персонажей на базе Gemini AI (модель 3.1).\n\n`;
+    let welcomeText = `👋 Привет! Я RP-бот с поддержкой персонажей на базе Gemini AI (модель 2.5 flash lite).\n\n`;
 
     if (!user?.api_key) {
         welcomeText += `🔑 Перед началом работы введи свой API-ключ Gemini:\n<code>/api ВАШ_КЛЮЧ</code>\n\n`;
