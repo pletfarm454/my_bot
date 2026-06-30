@@ -14,7 +14,7 @@
 
 // OpenRouter configuration
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL = "google/gemini-2.5-flash"; // Можно заменить на любую модель OpenRouter
+const DEFAULT_MODEL = "thedrummer/cydonia-24b-v4.1"; // Можно заменить на любую модель OpenRouter
 
 const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
 const COMPRESS_THRESHOLD = 50; // Увеличено с 25 для лучшего запоминания
