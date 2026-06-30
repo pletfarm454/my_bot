@@ -1,8 +1,10 @@
 /**
  * Telegram-бот на Cloudflare Workers + D1 + Gemini API
- * Модель: gemini-3.1-flash-lite
+ * Модель: gemini-2.5-flash-lite
  * ИСПРАВЛЕНО: Стабильная работа кнопок, перехват ошибок, умная кнопка "Назад", 
  * ИСПРАВЛЕНО: Адекватный ретрай при пустых ответах от API.
+ * ИСПРАВЛЕНО: Длина ответов теперь принудительно ограничивается через maxOutputTokens,
+ *             а не только текстовой инструкцией в system prompt.
  */
 
 // ============================================================
@@ -14,6 +16,18 @@ const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models
 const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
 const COMPRESS_THRESHOLD = 25;
 const COMPRESS_COUNT = 20;
+
+// Жёсткие лимиты токенов под каждую настройку длины ответа.
+// Это подкрепляет текстовую инструкцию реальным ограничением API,
+// поэтому модель физически не может написать длиннее, даже если
+// проигнорирует словесную просьбу о краткости.
+const LENGTH_TOKEN_MAP = {
+    "Очень короткие": 60,
+    "Короткие": 150,
+    "Средние": 400,
+    "Длинные": 1200,
+};
+const DEFAULT_MAX_TOKENS = LENGTH_TOKEN_MAP["Средние"];
 
 // ============================================================
 // ТОЧКА ВХОДА CLOUDFLARE WORKER
@@ -344,7 +358,9 @@ async function handleState(chatId, text, state, env) {
 
         let description = "";
         try {
-            description = await callGemini(user.api_key, genSystemPrompt, genContents);
+            // Генерация описания персонажа — отдельный лимит токенов, побольше,
+            // т.к. это не "ответ" в чате, а полноценное описание.
+            description = await callGemini(user.api_key, genSystemPrompt, genContents, 800);
         } catch (e) {
             await clearState(chatId, env);
             await sendMessage(chatId, `❌ Ошибка генерации:\n<code>${escapeHtml(String(e))}</code>`, mainMenuKeyboard(), env);
@@ -518,7 +534,7 @@ async function handleCallbackQuery(callbackQuery, env) {
 }
 
 // ============================================================
-// ОСНОВНАЯ ЛОГИКА ЧАТА С GEMINI (ИСПРАВЛЕННЫЙ РЕТРАЙ)
+// ОСНОВНАЯ ЛОГИКА ЧАТА С GEMINI (ИСПРАВЛЕННЫЙ РЕТРАЙ + ЖЁСТКАЯ ДЛИНА)
 // ============================================================
 
 async function handleChat(chatId, userText, env) {
@@ -554,6 +570,9 @@ async function handleChat(chatId, userText, env) {
 
     const systemPrompt = buildSystemPrompt(characterPrompt, user, env);
 
+    // Жёсткий лимит токенов под выбранную пользователем длину ответа.
+    const maxTokens = LENGTH_TOKEN_MAP[user.answer_length] || DEFAULT_MAX_TOKENS;
+
     await saveMessage(chatId, characterId, "user", userText, env);
     await maybeCompressContext(chatId, characterId, user.api_key, systemPrompt, env);
 
@@ -570,10 +589,10 @@ async function handleChat(chatId, userText, env) {
 
     await sendChatAction(chatId, "typing", env);
 
-    // ИСПРАВЛЕННЫЙ ЦИКЛ: делаем до 4 попыток, отправляя ИДЕ НТИЧНЫЙ запрос
+    // ИСПРАВЛЕННЫЙ ЦИКЛ: делаем до 4 попыток, отправляя ИДЕНТИЧНЫЙ запрос
     for (let attempt = 1; attempt <= 4; attempt++) {
         try {
-            botReply = await callGemini(user.api_key, systemPrompt, currentContents);
+            botReply = await callGemini(user.api_key, systemPrompt, currentContents, maxTokens);
         } catch (e) {
             // Если это реальная ошибка API (не пустой ответ), сразу выходим
             await sendMessage(chatId, `❌ Ошибка при запросе к Gemini:\n<code>${escapeHtml(String(e))}</code>`, null, env);
@@ -606,12 +625,19 @@ async function handleChat(chatId, userText, env) {
 // ВЫЗОВ GEMINI REST API
 // ============================================================
 
-async function callGemini(apiKey, systemPrompt, contents) {
+async function callGemini(apiKey, systemPrompt, contents, maxOutputTokens) {
     const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
     const body = {
         contents,
-        generationConfig: { temperature: 0.9 },
+        generationConfig: {
+            temperature: 0.9,
+            // Принудительный лимит токенов — основной фикс. Раньше длина
+            // регулировалась только текстовой инструкцией в system prompt,
+            // и модель могла её игнорировать. Теперь API физически обрезает
+            // ответ по достижении лимита, соответствующего выбранной длине.
+            maxOutputTokens: maxOutputTokens || DEFAULT_MAX_TOKENS,
+        },
     };
 
     if (systemPrompt && systemPrompt.trim() !== "") {
@@ -700,7 +726,8 @@ async function maybeCompressContext(chatId, characterId, apiKey, systemPrompt, e
 
     let summary = "";
     try {
-        summary = await callGemini(apiKey, systemPrompt, [{ role: "user", parts: [{ text: compressionPrompt }] }]);
+        // Резюме — не финальный ответ пользователю, поэтому отдельный больший лимит токенов.
+        summary = await callGemini(apiKey, systemPrompt, [{ role: "user", parts: [{ text: compressionPrompt }] }], 500);
     } catch (e) {
         return;
     }
@@ -944,4 +971,4 @@ function hideKeyboard() {
 
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        }
+}
