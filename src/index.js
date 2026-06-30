@@ -1,6 +1,6 @@
 /**
  * Telegram-бот на Cloudflare Workers + D1 + Gemini API
- * Модель: gemini-2.5-flash-lite
+ * Модель: gemini-2.5-flash
  * СТАБИЛЬНАЯ ВЕРСИЯ: Устранены падения при блокировках безопасности,
  * решена проблема с чередованием ролей, оптимизирована работа с SQLite.
  */
@@ -9,7 +9,7 @@
 // КОНСТАНТЫ
 // ============================================================
 
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
+const GEMINI_MODEL = "gemini-2.5-flash";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
 const COMPRESS_THRESHOLD = 25;
@@ -203,7 +203,7 @@ async function handleMessage(message, env) {
 
 async function handleStart(chatId, env) {
     const user = await getUser(chatId, env);
-    let welcomeText = `👋 Привет! Я RP-бот с поддержкой персонажей на базе Gemini AI (модель 2.5 flash lite).\n\n`;
+    let welcomeText = `👋 Привет! Я RP-бот с поддержкой персонажей на базе Gemini AI (модель 2.5 flash).\n\n`;
 
     if (!user?.api_key) {
         welcomeText += `🔑 Перед началом работы введи свой API-ключ Gemini:\n<code>/api ВАШ_КЛЮЧ</code>\n\n`;
