@@ -15,11 +15,6 @@
 // OpenRouter configuration
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "google/gemini-2.5-flash"; // Можно заменить на любую модель OpenRouter
-// Другие популярные модели:
-// - "anthropic/claude-3.5-sonnet"
-// - "meta-llama/llama-3-70b-instruct"
-// - "microsoft/gpt-4"
-// - "mistralai/mistral-7b-instruct"
 
 const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
 const COMPRESS_THRESHOLD = 50; // Увеличено с 25 для лучшего запоминания
@@ -236,169 +231,6 @@ async function handleMessage(message, env) {
     }
 
     if (text.includes("Вручную")) return await startCreateWizard(chatId, env);
-    if (text.includesЧКА ВХОДА CLOUDFLARE WORKER
-// ============================================================
-
-export default {
-    async fetch(request, env, ctx) {
-        if (request.method !== "POST") {
-            return new Response("OK", { status: 200 });
-        }
-
-        try {
-            const update = await request.json();
-            ctx.waitUntil(handleUpdate(update, env));
-        } catch (e) {
-            console.error("Ошибка инициализации:", e);
-        }
-
-        return new Response("OK", { status: 200 });
-    },
-};
-
-// ============================================================
-// ГЛАВНЫЙ ДИСПЕТЧЕР ОБНОВЛЕНИЙ (С ПЕРЕХВАТОМ ОШИБОК)
-// ============================================================
-
-async function handleUpdate(update, env) {
-    try {
-        if (update.callback_query) {
-            await handleCallbackQuery(update.callback_query, env);
-            return;
-        }
-
-        if (update.message) {
-            await handleMessage(update.message, env);
-            return;
-        }
-    } catch (e) {
-        console.error("Глобальная ошибка обработки:", e);
-        let chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id || update.callback_query?.from?.id;
-        if (chatId) {
-            try {
-                await sendMessage(chatId, `❌ Произошла внутренняя ошибка:\n<code>${escapeHtml(String(e))}</code>`, null, env);
-            } catch (err) {
-                console.error("Не удалось отправить сообщение об ошибке пользователю:", err);
-            }
-        }
-    }
-}
-
-// ============================================================
-// ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ
-// ============================================================
-
-async function handleMessage(message, env) {
-    const chatId = message.chat.id;
-    const text   = (message.text || "").trim();
-
-    if (!text) return;
-
-    // --- Команды ---
-    if (text.startsWith("/start")) {
-        await clearState(chatId, env);
-        await handleStart(chatId, env);
-        return;
-    }
-
-    if (text.startsWith("/help")) {
-        await handleHelp(chatId, env);
-        return;
-    }
-
-    if (text.startsWith("/myid")) {
-        await sendMessage(chatId, `Твой Telegram ID: <code>${chatId}</code>`, null, env);
-        return;
-    }
-
-    if (text.startsWith("/api ")) {
-        let apiKey = text.slice(5).trim();
-        apiKey = apiKey.replace(/\s+/g, "");
-        await handleSetApiKey(chatId, apiKey, env);
-        return;
-    }
-
-    // --- НОВЫЕ КОМАНДЫ ДЛЯ РАБОТЫ С СЮЖЕТАМИ ---
-    if (text.startsWith("/clear") || text.startsWith("/reset")) {
-        const user = await getUser(chatId, env);
-        if (!user?.char_id) {
-            await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
-            return;
-        }
-        await clearContext(chatId, user.char_id, env);
-        await sendMessage(chatId, "✅ История диалога очищена. Можно начинать сначала!", mainMenuKeyboard(), env);
-        return;
-    }
-
-    if (text.startsWith("/plot ")) {
-        const plotName = text.slice(6).trim();
-        if (!plotName) {
-            await sendMessage(chatId, "❌ Укажи название сюжета. Пример: /plot Мой новый сюжет", null, env);
-            return;
-        }
-        
-        const user = await getUser(chatId, env);
-        if (!user?.char_id) {
-            await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
-            return;
-        }
-        
-        // Ищем сюжет по названию
-        const plot = await env.DB.prepare(
-            `SELECT id FROM plots WHERE name LIKE ? AND character_id = ? AND creator_id = ?`
-        ).bind(`%${plotName}%`, user.char_id, chatId).first();
-        
-        if (!plot) {
-            await sendMessage(chatId, `❌ Сюжет "${plotName}" не найден. Используй /plots чтобы увидеть список.`, null, env);
-            return;
-        }
-        
-        await env.DB.prepare(`UPDATE users SET plot_id = ? WHERE chat_id = ?`).bind(plot.id, chatId).run();
-        
-        // Очищаем контекст при смене сюжета для чистоты
-        await clearContext(chatId, user.char_id, env);
-        
-        await sendMessage(chatId, `✅ Сюжет "${plotName}" выбран! История диалога очищена для нового сюжета.`, mainMenuKeyboard(), env);
-        return;
-    }
-
-    if (text.startsWith("/plots")) {
-        const user = await getUser(chatId, env);
-        if (!user?.char_id) {
-            await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
-            return;
-        }
-        await showPlotMenu(chatId, env, "select");
-        return;
-    }
-
-    // --- Кнопки выхода ---
-    if (text.startsWith("/cancel") || text.includes("Главное меню")) {
-        await clearState(chatId, env);
-        await sendMessage(chatId, "🏠 Главное меню", mainMenuKeyboard(), env);
-        return;
-    }
-
-    if (text.includes("Назад")) {
-        await clearState(chatId, env);
-        await showSettings(chatId, env);
-        return;
-    }
-
-    // --- Проверяем активное состояние ---
-    const state = await getState(chatId, env);
-    if (state) {
-        await handleState(chatId, text, state, env);
-        return;
-    }
-
-    // --- Навигация по Reply-кнопкам ---
-    if (text.includes("Создать персонажа")) {
-        await sendMessage(chatId, "➕ <b>Создание персонажа</b>\n\nКак хочешь создать?", createMenuKeyboard(), env);
-        return;
-    }
-
-    if (text.includes("Вручную")) return await startCreateWizard(chatId, env);
     if (text.includes("Сгенерировать AI")) return await startGenWizard(chatId, env);
 
     if (text.includes("Галерея")) return await showCharacterList(chatId, "gallery", env);
@@ -456,7 +288,7 @@ async function handleMessage(message, env) {
         return;
     }
 
-    // --- Обычное текстовое сообщение → отправляем в Gemini ---
+    // --- Обычное текстовое сообщение → отправляем в ИИ ---
     await handleChat(chatId, text, env);
 }
 
@@ -466,10 +298,10 @@ async function handleMessage(message, env) {
 
 async function handleStart(chatId, env) {
     const user = await getUser(chatId, env);
-    let welcomeText = `👋 Привет! Я RP-бот с поддержкой персонажей на базе Gemini AI (модель 2.5 flash).\n\n`;
+    let welcomeText = `👋 Привет! Я RP-бот с поддержкой персонажей на базе ИИ через OpenRouter API.\n\n`;
 
     if (!user?.api_key) {
-        welcomeText += `🔑 Перед началом работы введи свой API-ключ Gemini:\n<code>/api ВАШ_КЛЮЧ</code>\n\n`;
+        welcomeText += `🔑 Перед началом работы введи свой API-ключ OpenRouter:\n<code>/api ВАШ_КЛЮЧ</code>\n\n`;
     } else {
         welcomeText += `Ты можешь создавать персонажей, сюжеты и общаться с ними.\n\n`;
     }
@@ -494,7 +326,8 @@ async function handleHelp(chatId, env) {
         `/help — показать это сообщение\n` +
         `/cancel — отменить текущее действие\n` +
         `/myid — узнать свой Telegram ID\n` +
-        `/api [ключ] — установить API-ключ Gemini\n` +
+        `/api [ключ] — установить API-ключ OpenRouter\n` +
+        `/model [название] — выбрать ИИ-модель\n` +
         `/clear — очистить историю диалога\n` +
         `/plot [название] — выбрать сюжет по названию\n` +
         `/plots — показать список сюжетов`;
@@ -508,7 +341,7 @@ async function handleHelp(chatId, env) {
 
 async function handleSetApiKey(chatId, apiKey, env) {
     if (!apiKey) {
-        await sendMessage(chatId, "❌ Ключ не может быть пустым. Пример:\n<code>/api AIza...</code>", null, env);
+        await sendMessage(chatId, "❌ Ключ не может быть пустым. Пример:\n<code>/api sk-or-...</code>", null, env);
         return;
     }
 
@@ -541,6 +374,8 @@ async function showMyStatus(chatId, env) {
     } else {
         statusText += `📖 <b>Сюжет:</b> Не выбран\n`;
     }
+
+    statusText += `🤖 <b>Модель:</b> <code>${escapeHtml(user?.model || DEFAULT_MODEL)}</code>\n`;
 
     statusText += `\n<b>Настройки:</b>\n` +
                   `👤 Имя: ${user?.user_name ? escapeHtml(user.user_name) : "Не задано"}\n` +
@@ -624,7 +459,7 @@ async function handleState(chatId, text, state, env) {
 
         let description = "";
         try {
-            description = await callGemini(user.api_key, genSystemPrompt, genContents, 800);
+            description = await callGemini(user.api_key, genSystemPrompt, genContents, 800, DEFAULT_MODEL);
         } catch (e) {
             await clearState(chatId, env);
             await sendMessage(chatId, `❌ Ошибка генерации:\n<code>${escapeHtml(String(e))}</code>`, mainMenuKeyboard(), env);
@@ -805,7 +640,7 @@ async function handleCallbackQuery(callbackQuery, env) {
 }
 
 // ============================================================
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПОДГОТОВКИ ДИАЛОГА GEMINI
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПОДГОТОВКИ ДИАЛОГА
 // ============================================================
 
 function prepareContents(historyResults) {
@@ -831,14 +666,14 @@ function prepareContents(historyResults) {
 }
 
 // ============================================================
-// ОСНОВНАЯ ЛОГИКА ЧАТА С GEMINI
+// ОСНОВНАЯ ЛОГИКА ЧАТА С OPENROUTER
 // ============================================================
 
 async function handleChat(chatId, userText, env) {
     const user = await getUser(chatId, env);
 
     if (!user?.api_key) {
-        await sendMessage(chatId, "🔑 Пожалуйста, введи свой API-ключ Gemini:\n<code>/api ВАШ_КЛЮЧ</code>", null, env);
+        await sendMessage(chatId, "🔑 Пожалуйста, введи свой API-ключ OpenRouter:\n<code>/api ВАШ_КЛЮЧ</code>", null, env);
         return;
     }
 
@@ -890,17 +725,19 @@ async function handleChat(chatId, userText, env) {
 
     await sendChatAction(chatId, "typing", env);
 
+    const modelToUse = user?.model || DEFAULT_MODEL;
+
     for (let attempt = 1; attempt <= 4; attempt++) {
         try {
-            botReply = await callGemini(user.api_key, systemPrompt, currentContents, maxTokens);
+            botReply = await callGemini(user.api_key, systemPrompt, currentContents, maxTokens, modelToUse);
         } catch (e) {
-            await sendMessage(chatId, `❌ Ошибка при запросе к Gemini:\n<code>${escapeHtml(String(e))}</code>`, null, env);
+            await sendMessage(chatId, `❌ Ошибка при запросе к OpenRouter:\n<code>${escapeHtml(String(e))}</code>`, null, env);
             return;
         }
 
         if (botReply) break;
 
-        console.log(`Попытка ${attempt}: пустой ответ от Gemini. Пробуем снова...`);
+        console.log(`Попытка ${attempt}: пустой ответ от ИИ. Пробуем снова...`);
         
         if (attempt < 4) {
             await new Promise(resolve => setTimeout(resolve, 500));
@@ -908,7 +745,7 @@ async function handleChat(chatId, userText, env) {
     }
 
     if (!botReply) {
-        await sendMessage(chatId, "❌ Gemini вернул пустой ответ после 4 попыток. Попробуй переформулировать запрос.", null, env);
+        await sendMessage(chatId, "❌ ИИ вернул пустой ответ после 4 попыток. Попробуй переформулировать запрос.", null, env);
         return;
     }
 
@@ -919,27 +756,40 @@ async function handleChat(chatId, userText, env) {
 }
 
 // ============================================================
-// ВЫЗОВ GEMINI REST API
+// ВЫЗОВ OPENROUTER API
 // ============================================================
 
-async function callGemini(apiKey, systemPrompt, contents, maxOutputTokens) {
-    const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+async function callGemini(apiKey, systemPrompt, contents, maxOutputTokens, modelName = DEFAULT_MODEL) {
+    const url = OPENROUTER_API_BASE;
+
+    // Преобразуем структуру диалога в стандартный формат Chat Completions
+    const messages = [];
+    
+    if (systemPrompt && systemPrompt.trim() !== "") {
+        messages.push({ role: "system", content: systemPrompt });
+    }
+
+    if (contents && contents.length > 0) {
+        for (const item of contents) {
+            const role = item.role === "model" ? "assistant" : "user";
+            const content = item.parts?.[0]?.text || "";
+            messages.push({ role, content });
+        }
+    }
 
     const body = {
-        contents,
-        generationConfig: {
-            temperature: 0.9,
-            maxOutputTokens: maxOutputTokens || DEFAULT_MAX_TOKENS,
-        },
+        model: modelName,
+        messages: messages,
+        temperature: 0.9,
+        max_tokens: maxOutputTokens || DEFAULT_MAX_TOKENS,
     };
-
-    if (systemPrompt && systemPrompt.trim() !== "") {
-        body.system_instruction = { parts: [{ text: systemPrompt }] };
-    }
 
     const response = await fetch(url, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`
+        },
         body:    JSON.stringify(body),
     });
 
@@ -950,23 +800,11 @@ async function callGemini(apiKey, systemPrompt, contents, maxOutputTokens) {
 
     const data = await response.json();
 
-    if (data?.promptFeedback?.blockReason) {
-        throw new Error(`Запрос заблокирован по соображениям безопасности (Причина: ${data.promptFeedback.blockReason})`);
+    if (data?.error) {
+        throw new Error(`OpenRouter Error: ${data.error.message || JSON.stringify(data.error)}`);
     }
 
-    const candidate = data?.candidates?.[0];
-    
-    if (candidate?.finishReason && candidate.finishReason !== "STOP" && candidate.finishReason !== "MAX_TOKENS") {
-        if (candidate.finishReason === "SAFETY") {
-            throw new Error("Ответ заблокирован фильтром безопасности Gemini. Пожалуйста, смените тему.");
-        }
-        if (candidate.finishReason === "RECITATION") {
-            throw new Error("Ответ заблокирован из-за совпадения с защищенным авторским правом текстом (RECITATION).");
-        }
-        throw new Error(`Генерация прервана API (Причина: ${candidate.finishReason})`);
-    }
-
-    const text = candidate?.content?.parts?.[0]?.text;
+    const text = data?.choices?.[0]?.message?.content;
 
     if (!text) return null;
 
@@ -1033,7 +871,7 @@ async function maybeCompressContext(chatId, characterId, apiKey, systemPrompt, e
 
     let summary = "";
     try {
-        summary = await callGemini(apiKey, systemPrompt, [{ role: "user", parts: [{ text: compressionPrompt }] }], 500);
+        summary = await callGemini(apiKey, systemPrompt, [{ role: "user", parts: [{ text: compressionPrompt }] }], 500, DEFAULT_MODEL);
     } catch (e) {
         return;
     }
@@ -1070,7 +908,7 @@ async function clearState(chatId, env) {
 
 async function getUser(chatId, env) {
     return await env.DB.prepare(
-        `SELECT chat_id, api_key, char_id, language, user_name, user_description, answer_length, plot_id FROM users WHERE chat_id = ?`
+        `SELECT chat_id, api_key, char_id, language, user_name, user_description, answer_length, plot_id, model FROM users WHERE chat_id = ?`
     ).bind(chatId).first();
 }
 
@@ -1282,4 +1120,4 @@ function hideKeyboard() {
 
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+        }
