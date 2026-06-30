@@ -738,7 +738,7 @@ function buildSystemPrompt(characterPrompt, user, env) {
         } else {
             lengthRule = "Твои ответы должны быть средней длины (3-5 предложений).";
         }
-        userSettings += lengthRule + "\n";
+        userSettings += `Твой ответ должен быть короче ${maxTokens} токенов. Если не помещается — сокращай.\n`;
     }
 
     let finalPrompt = characterPrompt + userSettings;
@@ -1019,3 +1019,4 @@ function hideKeyboard() {
 function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
+
