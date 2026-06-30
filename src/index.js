@@ -1,18 +1,26 @@
 /**
- * Telegram-бот на Cloudflare Workers + D1 + Gemini API
- * Модель: gemini-2.5-flash
+ * Telegram-бот на Cloudflare Workers + D1 + OpenRouter API
+ * Модель: google/gemini-2.5-flash (или любая другая через OpenRouter)
  * СТАБИЛЬНАЯ ВЕРСИЯ: Устранены падения при блокировках безопасности,
  * решена проблема с чередованием ролей, оптимизирована работа с SQLite.
  * ИСПРАВЛЕНО: ReferenceError maxTokens, улучшена регулировка длины ответов.
  * ДОБАВЛЕНО: Динамическая работа с сюжетами, команды /clear, /plot, /plots
+ * ИЗМЕНЕНО: Использование OpenRouter API вместо Google Gemini
  */
 
 // ============================================================
 // КОНСТАНТЫ
 // ============================================================
 
-const GEMINI_MODEL = "gemini-2.5-flash";
-const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+// OpenRouter configuration
+const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1/chat/completions";
+const DEFAULT_MODEL = "google/gemini-2.5-flash"; // Можно заменить на любую модель OpenRouter
+// Другие популярные модели:
+// - "anthropic/claude-3.5-sonnet"
+// - "meta-llama/llama-3-70b-instruct"
+// - "microsoft/gpt-4"
+// - "mistralai/mistral-7b-instruct"
+
 const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
 const COMPRESS_THRESHOLD = 50; // Увеличено с 25 для лучшего запоминания
 const COMPRESS_COUNT = 20;
@@ -54,6 +62,181 @@ const LENGTH_RULE_MAP = {
 
 // ============================================================
 // ТОЧКА ВХОДА CLOUDFLARE WORKER
+// ============================================================
+
+export default {
+    async fetch(request, env, ctx) {
+        if (request.method !== "POST") {
+            return new Response("OK", { status: 200 });
+        }
+
+        try {
+            const update = await request.json();
+            ctx.waitUntil(handleUpdate(update, env));
+        } catch (e) {
+            console.error("Ошибка инициализации:", e);
+        }
+
+        return new Response("OK", { status: 200 });
+    },
+};
+
+// ============================================================
+// ГЛАВНЫЙ ДИСПЕТЧЕР ОБНОВЛЕНИЙ (С ПЕРЕХВАТОМ ОШИБОК)
+// ============================================================
+
+async function handleUpdate(update, env) {
+    try {
+        if (update.callback_query) {
+            await handleCallbackQuery(update.callback_query, env);
+            return;
+        }
+
+        if (update.message) {
+            await handleMessage(update.message, env);
+            return;
+        }
+    } catch (e) {
+        console.error("Глобальная ошибка обработки:", e);
+        let chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id || update.callback_query?.from?.id;
+        if (chatId) {
+            try {
+                await sendMessage(chatId, `❌ Произошла внутренняя ошибка:\n<code>${escapeHtml(String(e))}</code>`, null, env);
+            } catch (err) {
+                console.error("Не удалось отправить сообщение об ошибке пользователю:", err);
+            }
+        }
+    }
+}
+
+// ============================================================
+// ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ
+// ============================================================
+
+async function handleMessage(message, env) {
+    const chatId = message.chat.id;
+    const text   = (message.text || "").trim();
+
+    if (!text) return;
+
+    // --- Команды ---
+    if (text.startsWith("/start")) {
+        await clearState(chatId, env);
+        await handleStart(chatId, env);
+        return;
+    }
+
+    if (text.startsWith("/help")) {
+        await handleHelp(chatId, env);
+        return;
+    }
+
+    if (text.startsWith("/myid")) {
+        await sendMessage(chatId, `Твой Telegram ID: <code>${chatId}</code>`, null, env);
+        return;
+    }
+
+    if (text.startsWith("/api ")) {
+        let apiKey = text.slice(5).trim();
+        apiKey = apiKey.replace(/\s+/g, "");
+        await handleSetApiKey(chatId, apiKey, env);
+        return;
+    }
+
+    // --- Команда для выбора модели OpenRouter ---
+    if (text.startsWith("/model ")) {
+        const model = text.slice(7).trim();
+        if (!model) {
+            await sendMessage(chatId, "❌ Укажи модель. Пример: /model anthropic/claude-3.5-sonnet", null, env);
+            return;
+        }
+        await updateUserField(chatId, "model", model, env);
+        await sendMessage(chatId, `✅ Модель изменена на: <code>${escapeHtml(model)}</code>`, mainMenuKeyboard(), env);
+        return;
+    }
+
+    // --- НОВЫЕ КОМАНДЫ ДЛЯ РАБОТЫ С СЮЖЕТАМИ ---
+    if (text.startsWith("/clear") || text.startsWith("/reset")) {
+        const user = await getUser(chatId, env);
+        if (!user?.char_id) {
+            await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
+            return;
+        }
+        await clearContext(chatId, user.char_id, env);
+        await sendMessage(chatId, "✅ История диалога очищена. Можно начинать сначала!", mainMenuKeyboard(), env);
+        return;
+    }
+
+    if (text.startsWith("/plot ")) {
+        const plotName = text.slice(6).trim();
+        if (!plotName) {
+            await sendMessage(chatId, "❌ Укажи название сюжета. Пример: /plot Мой новый сюжет", null, env);
+            return;
+        }
+        
+        const user = await getUser(chatId, env);
+        if (!user?.char_id) {
+            await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
+            return;
+        }
+        
+        // Ищем сюжет по названию
+        const plot = await env.DB.prepare(
+            `SELECT id FROM plots WHERE name LIKE ? AND character_id = ? AND creator_id = ?`
+        ).bind(`%${plotName}%`, user.char_id, chatId).first();
+        
+        if (!plot) {
+            await sendMessage(chatId, `❌ Сюжет "${plotName}" не найден. Используй /plots чтобы увидеть список.`, null, env);
+            return;
+        }
+        
+        await env.DB.prepare(`UPDATE users SET plot_id = ? WHERE chat_id = ?`).bind(plot.id, chatId).run();
+        
+        // Очищаем контекст при смене сюжета для чистоты
+        await clearContext(chatId, user.char_id, env);
+        
+        await sendMessage(chatId, `✅ Сюжет "${plotName}" выбран! История диалога очищена для нового сюжета.`, mainMenuKeyboard(), env);
+        return;
+    }
+
+    if (text.startsWith("/plots")) {
+        const user = await getUser(chatId, env);
+        if (!user?.char_id) {
+            await sendMessage(chatId, "❌ Сначала выбери персонажа.", null, env);
+            return;
+        }
+        await showPlotMenu(chatId, env, "select");
+        return;
+    }
+
+    // --- Кнопки выхода ---
+    if (text.startsWith("/cancel") || text.includes("Главное меню")) {
+        await clearState(chatId, env);
+        await sendMessage(chatId, "🏠 Главное меню", mainMenuKeyboard(), env);
+        return;
+    }
+
+    if (text.includes("Назад")) {
+        await clearState(chatId, env);
+        await showSettings(chatId, env);
+        return;
+    }
+
+    // --- Проверяем активное состояние ---
+    const state = await getState(chatId, env);
+    if (state) {
+        await handleState(chatId, text, state, env);
+        return;
+    }
+
+    // --- Навигация по Reply-кнопкам ---
+    if (text.includes("Создать персонажа")) {
+        await sendMessage(chatId, "➕ <b>Создание персонажа</b>\n\nКак хочешь создать?", createMenuKeyboard(), env);
+        return;
+    }
+
+    if (text.includes("Вручную")) return await startCreateWizard(chatId, env);
+    if (text.includesЧКА ВХОДА CLOUDFLARE WORKER
 // ============================================================
 
 export default {
